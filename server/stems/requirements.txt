@@ -1,0 +1,6 @@
+# GPU stem separation (~5-15s per song on NVIDIA RTX-class GPUs)
+# Install: pip install -r server/stems/requirements.txt
+# Use CUDA build of PyTorch: https://pytorch.org/get-started/locally/
+torch>=2.2.0
+torchaudio>=2.2.0
+demucs>=4.0.1

@@ -1,0 +1,30 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+*.tsbuildinfo
+
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+server/.env
+
+# Local overrides
+*.local
+
+# Stem separation temp jobs (may contain uploaded audio paths)
+server/stems/.stem-jobs/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large MediaPipe model binaries (download separately)
+public/models/*.task
