@@ -29,6 +29,14 @@ export interface HandFeatures {
   fingers: { thumb: boolean; index: boolean; middle: boolean; ring: boolean; pinky: boolean };
 }
 
+export const GESTURE_THRESHOLDS = {
+  fingerStraight: 0.52,
+  thumbStraight: 0.78,
+  pinchDist: 0.62,
+  fistOpenness: 0.22,
+  openPalm: 0.42,
+};
+
 interface V2 {
   x: number;
   y: number;
@@ -51,20 +59,24 @@ function dist(a: NormalizedLandmark, b: NormalizedLandmark): number {
 }
 
 /**
- * A finger is "straight/extended" when the joints are roughly collinear:
- * the angle between (mcp->pip) and (pip->tip) is small (cosine near 1).
- * This is orientation independent, so it is robust to hand rotation.
+ * A finger is extended when joints are collinear OR the tip reaches past the pip.
+ * The dual test catches curled-in-webcam angles that fail the cosine check alone.
  */
-function fingerStraight(
+function fingerExtended(
   lm: NormalizedLandmark[],
   mcp: number,
   pip: number,
   tip: number,
-  threshold = 0.6,
+  scale: number,
+  straightThreshold: number,
 ): boolean {
   const a = sub(lm[pip], lm[mcp]);
   const b = sub(lm[tip], lm[pip]);
-  return dot(a, b) / (mag(a) * mag(b)) > threshold;
+  const straight = dot(a, b) / (mag(a) * mag(b)) > straightThreshold;
+  const tipReach = dist(lm[tip], lm[WRIST]) / scale;
+  const pipReach = dist(lm[pip], lm[WRIST]) / scale;
+  const byReach = tipReach > pipReach * 1.12;
+  return straight || byReach;
 }
 
 export function extractFeatures(
@@ -76,13 +88,21 @@ export function extractFeatures(
   const cx = (wrist.x + middleMcp.x) / 2;
   const cy = (wrist.y + middleMcp.y) / 2;
   const scale = dist(wrist, middleMcp) || 1e-3;
+  const t = GESTURE_THRESHOLDS;
 
   const fingers = {
-    thumb: fingerStraight(landmarks, THUMB_MCP, THUMB_IP, THUMB_TIP, 0.85),
-    index: fingerStraight(landmarks, INDEX_MCP, INDEX_PIP, INDEX_TIP),
-    middle: fingerStraight(landmarks, MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP),
-    ring: fingerStraight(landmarks, RING_MCP, RING_PIP, RING_TIP),
-    pinky: fingerStraight(landmarks, PINKY_MCP, PINKY_PIP, PINKY_TIP),
+    thumb: fingerExtended(
+      landmarks,
+      THUMB_MCP,
+      THUMB_IP,
+      THUMB_TIP,
+      scale,
+      t.thumbStraight,
+    ),
+    index: fingerExtended(landmarks, INDEX_MCP, INDEX_PIP, INDEX_TIP, scale, t.fingerStraight),
+    middle: fingerExtended(landmarks, MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP, scale, t.fingerStraight),
+    ring: fingerExtended(landmarks, RING_MCP, RING_PIP, RING_TIP, scale, t.fingerStraight),
+    pinky: fingerExtended(landmarks, PINKY_MCP, PINKY_PIP, PINKY_TIP, scale, t.fingerStraight),
   };
 
   const extendedCount =
@@ -92,20 +112,30 @@ export function extractFeatures(
     Number(fingers.pinky);
 
   const pinchDist = dist(landmarks[THUMB_TIP], landmarks[INDEX_TIP]) / scale;
-  const pinch = clamp01(1 - (pinchDist - 0.2) / 0.8);
-  const isPinch = pinchDist < 0.55 && !fingers.middle && !fingers.ring;
+  const pinch = clamp01(1 - (pinchDist - 0.15) / 0.75);
+  const strongPinch = pinchDist < t.pinchDist || pinch > 0.55;
+  const isPinch =
+    strongPinch &&
+    (!fingers.middle || pinch > 0.72) &&
+    (!fingers.ring || pinch > 0.78);
+
+  const openness = extendedCount / 4;
 
   let pose: Pose;
   if (isPinch) {
     pose = "pinch";
-  } else if (extendedCount === 0) {
+  } else if (extendedCount === 0 || openness <= t.fistOpenness) {
     pose = "fist";
-  } else if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
+  } else if (fingers.index && !fingers.middle && extendedCount <= 2) {
     pose = "point";
-  } else if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) {
+  } else if (fingers.index && fingers.middle && !fingers.ring) {
     pose = "peace";
-  } else if (extendedCount >= 3) {
+  } else if (extendedCount >= 2 && openness >= t.openPalm) {
     pose = "open";
+  } else if (fingers.index && fingers.middle) {
+    pose = "peace";
+  } else if (fingers.index) {
+    pose = "point";
   } else {
     pose = "none";
   }
@@ -115,7 +145,7 @@ export function extractFeatures(
     y: clamp01(cy),
     pose,
     pinch,
-    openness: extendedCount / 4,
+    openness,
     fingers,
   };
 }

@@ -162,9 +162,9 @@ export interface ControlConfig {
 }
 
 export const DEFAULT_CONTROL: ControlConfig = {
-  moveThreshold: 0.12,
-  velocityThreshold: 0.5,
-  fistOpenness: 0.25,
-  pinchOn: 0.6,
-  openPalm: 0.55,
+  moveThreshold: 0.1,
+  velocityThreshold: 0.38,
+  fistOpenness: 0.22,
+  pinchOn: 0.52,
+  openPalm: 0.42,
 };

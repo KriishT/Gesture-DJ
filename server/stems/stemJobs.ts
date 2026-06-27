@@ -190,7 +190,7 @@ export async function probeStemBackend(): Promise<{
         });
         return;
       }
-      const hasCuda = out.trim().includes("cuda");
+      const hasCuda = out.trim() === "cuda";
       if (hasCuda) {
         resolve({
           ok: true,

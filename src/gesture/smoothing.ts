@@ -1,6 +1,8 @@
 // One-Euro filter: low latency + low jitter smoothing for noisy signals.
 // Reference: Casiez et al., "1€ Filter".
 
+import type { Pose } from "./gestures";
+
 class LowPass {
   private y: number | null = null;
   private s: number | null = null;
@@ -62,23 +64,63 @@ export class OneEuroFilter {
 /** Debounce a boolean so brief flickers don't trigger/untrigger. */
 export class BoolDebounce {
   private state: boolean;
-  private lastChange = 0;
+  private pending: boolean;
+  private pendingSince = 0;
   private holdMs: number;
 
   constructor(initial = false, holdMs = 120) {
     this.state = initial;
+    this.pending = initial;
     this.holdMs = holdMs;
   }
 
   update(raw: boolean, nowMs: number): boolean {
-    if (raw !== this.state && nowMs - this.lastChange > this.holdMs) {
-      this.state = raw;
-      this.lastChange = nowMs;
+    if (raw === this.pending) {
+      if (raw !== this.state && nowMs - this.pendingSince >= this.holdMs) {
+        this.state = raw;
+      }
+    } else {
+      this.pending = raw;
+      this.pendingSince = nowMs;
     }
     return this.state;
   }
 
   get value(): boolean {
     return this.state;
+  }
+}
+
+/** Fast to activate poses, slower to release — reduces flicker without feeling laggy. */
+export class PoseDebouncer {
+  private active: Pose = "none";
+  private candidate: Pose = "none";
+  private candidateSince = 0;
+
+  constructor(
+    private enterMs = 42,
+    private exitMs = 95,
+  ) {}
+
+  update(raw: Pose, nowMs: number): Pose {
+    if (raw === this.active) {
+      this.candidate = raw;
+      return this.active;
+    }
+    if (raw !== this.candidate) {
+      this.candidate = raw;
+      this.candidateSince = nowMs;
+    }
+    const hold = raw === "none" || raw === this.active ? this.exitMs : this.enterMs;
+    if (nowMs - this.candidateSince >= hold) {
+      this.active = raw;
+    }
+    return this.active;
+  }
+
+  reset(): void {
+    this.active = "none";
+    this.candidate = "none";
+    this.candidateSince = 0;
   }
 }

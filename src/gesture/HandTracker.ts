@@ -43,6 +43,8 @@ export class HandTracker {
     left: makeFilters(),
     right: makeFilters(),
   };
+  /** Prevents deck flip when a single hand hovers near screen center. */
+  private lastSingleSide: "left" | "right" | null = null;
 
   async init(video: HTMLVideoElement): Promise<void> {
     this.video = video;
@@ -65,9 +67,9 @@ export class HandTracker {
         baseOptions: { modelAssetPath, delegate: "GPU" },
         runningMode: "VIDEO",
         numHands: 2,
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
+        minHandDetectionConfidence: 0.4,
+        minHandPresenceConfidence: 0.4,
+        minTrackingConfidence: 0.4,
       });
     try {
       return await make(LOCAL_MODEL);
@@ -104,11 +106,16 @@ export class HandTracker {
     let left: TrackedHand | null = null;
     let right: TrackedHand | null = null;
     if (items.length === 1) {
-      // Single hand: assign by which half of the screen it is in.
       const only = items[0];
-      if (only.feat.x < 0.5) left = this.smooth("left", only);
+      let side: "left" | "right";
+      if (only.feat.x < 0.36) side = "left";
+      else if (only.feat.x > 0.64) side = "right";
+      else side = this.lastSingleSide ?? (only.feat.x < 0.5 ? "left" : "right");
+      this.lastSingleSide = side;
+      if (side === "left") left = this.smooth("left", only);
       else right = this.smooth("right", only);
     } else if (items.length >= 2) {
+      this.lastSingleSide = null;
       left = this.smooth("left", items[0]);
       right = this.smooth("right", items[items.length - 1]);
     }
@@ -154,9 +161,9 @@ export class HandTracker {
 
 function makeFilters(): AxisFilters {
   return {
-    x: new OneEuroFilter(1.2, 0.015),
-    y: new OneEuroFilter(1.2, 0.015),
-    open: new OneEuroFilter(2.0, 0.02),
-    pinch: new OneEuroFilter(2.0, 0.02),
+    x: new OneEuroFilter(1.0, 0.022),
+    y: new OneEuroFilter(1.0, 0.022),
+    open: new OneEuroFilter(1.6, 0.028),
+    pinch: new OneEuroFilter(1.6, 0.028),
   };
 }

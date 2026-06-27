@@ -2,7 +2,7 @@ import type { AudioEngine } from "./AudioEngine";
 import type { StepAction, DeckRef, TransitionRecipe } from "../copilot/recipeTypes";
 import { recipeUsesSlam, recipeUsesStems } from "../copilot/transitionLibrary";
 import { clamp } from "./audioMath";
-import { computeTransitionSyncRatio } from "./syncRatio";
+import { computeTransitionSyncRatio, computeSyncRatio, shouldBeatmatch } from "./syncRatio";
 import {
   alignPositionToMasterBeat,
   computeStemSyncRatio,
@@ -37,6 +37,7 @@ export class TransitionGuard {
   private usesSlam = false;
   private syncRatio = 1;
   private tempoRestoreStarted = false;
+  private xfAnimId: number | null = null;
 
   constructor(eng: AudioEngine) {
     this.eng = eng;
@@ -57,8 +58,11 @@ export class TransitionGuard {
     this.usesSlam = recipeUsesSlam(recipe);
     this.tempoRestoreStarted = false;
     this.syncRatio = 1;
+    this.cancelCrossfadeAnim();
+
     this.eng.deckA.cancelGlideRate();
     this.eng.deckB.cancelGlideRate();
+    this.clearFx();
 
     if (this.usesStems) {
       this.prepareStemTransition(recipe);
@@ -98,7 +102,6 @@ export class TransitionGuard {
     this.eng.deckB.seek(cue);
   }
 
-  /** Drop/slam moves: lock B to A's grid with pitch-locked sync + phase cue. */
   private prepareSlamTransition(recipe: TransitionRecipe): void {
     const { bpmA, bpmB, offsetA, offsetB, positionA } = this.timing;
     const ratio = computeStemSyncRatio(bpmA, bpmB);
@@ -141,11 +144,13 @@ export class TransitionGuard {
     this.eng.deckB.seek(snapped);
   }
 
-  primeIncoming(): void {
+  private primeIncoming(): void {
     this.eng.deckA.setVolume(1, false);
+    this.eng.deckA.setFilter(0, false);
+    this.eng.deckA.setEq({ low: 0, mid: 0, high: 0 });
     this.eng.deckB.setVolume(1, false);
-    this.eng.deckB.setEq({ low: -40 });
     this.eng.deckB.setFilter(0, false);
+    this.eng.deckB.setEq({ low: this.usesStems ? -28 : -36, mid: 0, high: 0 });
     this.eng.crossfader.setPosition(0, true);
   }
 
@@ -153,7 +158,7 @@ export class TransitionGuard {
     const deck = this.eng.deck(action.deck as DeckRef);
     const isB = action.deck === "B";
     const beats = action.beats ?? 4;
-    const dur = Math.max(0.05, beats * secondsPerBeat);
+    const dur = Math.max(0.08, beats * secondsPerBeat);
 
     switch (action.type) {
       case "play":
@@ -161,86 +166,124 @@ export class TransitionGuard {
           if (isB && (this.usesStems || this.usesSlam)) {
             this.alignDeckToMaster("B", "A");
           }
+          deck.setVolume(1, false);
           deck.play();
         }
         break;
       case "volume": {
         const t = action.target ?? 1;
-        this.crossfadeTo(isB ? t : 1 - t, dur);
-        if (isB && t >= 0.65) this.beginTempoRestore(dur);
+        this.crossfadeTo(isB ? t : 1 - t, Math.max(secondsPerBeat * 2, dur));
+        if (isB && t >= 0.55) this.beginTempoRestore(Math.max(dur, secondsPerBeat * 4));
         break;
       }
       case "filter":
-        deck.rampFilter(action.target ?? 0, dur);
+        deck.rampFilter(action.target ?? 0, Math.max(secondsPerBeat * 2, dur));
         break;
       case "bassKill":
-        deck.rampEqLow(-40, dur);
+        deck.rampEqLow(-40, Math.max(secondsPerBeat * 1.5, dur * 0.85));
         break;
       case "bassRestore":
-        deck.rampEqLow(0, dur);
+        deck.rampEqLow(0, Math.max(secondsPerBeat * 2, dur));
         break;
       case "crossfade":
-        this.crossfadeTo(action.target ?? 1, dur);
-        if (isB && (action.target ?? 1) >= 0.65) this.beginTempoRestore(dur);
+        this.crossfadeTo(action.target ?? 1, Math.max(secondsPerBeat * 3, dur));
+        if (isB && (action.target ?? 1) >= 0.55) {
+          this.beginTempoRestore(Math.max(dur, secondsPerBeat * 4));
+        }
         break;
       case "slam":
         this.executeSlam(secondsPerBeat);
         break;
       case "echoOut": {
         const echo = this.eng.echo(action.deck as DeckRef);
-        echo.setFeedback(action.target ?? 0.65);
-        echo.setSend(0.75);
-        const xfDur = Math.min(dur, secondsPerBeat * 2);
-        this.crossfadeTo(isB ? 0 : 1, xfDur);
-        if (!isB) this.beginTempoRestore(Math.max(xfDur * 2, secondsPerBeat * 4));
+        echo.setFeedback(0.62);
+        echo.setSend(0.68);
+        deck.rampFilter(0.55, Math.max(secondsPerBeat * 2, dur * 0.5));
+        if (!isB) {
+          deck.rampEqLow(-40, secondsPerBeat * 1.5);
+          const xfDur = Math.max(secondsPerBeat * 3, dur * 0.75);
+          this.crossfadeTo(0.75, xfDur);
+          this.beginTempoRestore(Math.max(xfDur * 1.5, secondsPerBeat * 6));
+        } else {
+          this.crossfadeTo(0.35, Math.max(secondsPerBeat * 2, dur * 0.6));
+        }
+        window.setTimeout(() => echo.setSend(0.15), Math.max(900, dur * 800));
         break;
       }
       case "cut":
-        this.crossfadeTo(isB ? 1 : 0, 0.06);
-        if (isB) this.beginTempoRestore(secondsPerBeat * 4);
+        this.crossfadeTo(isB ? 1 : 0, Math.max(0.12, secondsPerBeat * 0.35));
+        if (isB) this.beginTempoRestore(secondsPerBeat * 6);
         break;
       case "reverb": {
-        const wet = action.target ?? 0.7;
-        this.eng.reverb(action.deck as DeckRef).setSend(wet);
-        deck.rampFilter(0.75, dur * 0.6);
-        this.crossfadeTo(isB ? 0 : 1, dur);
-        if (!isB) this.beginTempoRestore(dur);
+        const wet = action.target ?? 0.65;
+        this.eng.reverb(action.deck as DeckRef).setSend(clamp(wet, 0.35, 0.72));
+        deck.rampFilter(0.7, Math.max(secondsPerBeat * 2, dur * 0.65));
+        deck.rampEqLow(-38, Math.max(secondsPerBeat * 1.5, dur * 0.5));
+        if (!isB) {
+          this.crossfadeTo(0.8, Math.max(secondsPerBeat * 4, dur));
+          this.beginTempoRestore(Math.max(dur, secondsPerBeat * 5));
+        }
+        window.setTimeout(() => this.eng.reverb(action.deck as DeckRef).setSend(0), Math.max(1400, dur * 900));
         break;
       }
       case "brake":
-        deck.brake(Math.min(dur, 1.8));
-        this.crossfadeTo(isB ? 0 : 1, 0.35);
-        if (!isB) this.beginTempoRestore(secondsPerBeat * 4);
+        deck.brake(Math.min(dur, secondsPerBeat * 2.5));
+        deck.rampEqLow(-40, secondsPerBeat);
+        if (!isB) {
+          this.crossfadeTo(0.85, Math.max(secondsPerBeat * 2, 0.5));
+          this.beginTempoRestore(secondsPerBeat * 5);
+        }
         break;
       case "spinback":
-        deck.spinback(0.45);
-        this.crossfadeTo(isB ? 0 : 1, 0.25);
-        if (!isB) this.beginTempoRestore(secondsPerBeat * 3);
+        deck.spinback(0.48);
+        deck.rampEqLow(-40, secondsPerBeat * 0.8);
+        if (!isB) {
+          this.crossfadeTo(0.9, Math.max(secondsPerBeat * 1.5, 0.4));
+          this.beginTempoRestore(secondsPerBeat * 4);
+        }
         break;
       case "gate":
-        deck.gate(dur, secondsPerBeat, action.target ?? 0.5);
+        deck.gate(dur, secondsPerBeat, action.target ?? 0.48);
+        if (!isB) {
+          this.crossfadeTo(0.62, Math.max(secondsPerBeat * 3, dur * 0.7));
+          this.beginTempoRestore(secondsPerBeat * 4);
+        }
         break;
       case "stemPreset": {
         if (!deck.stemsReady) break;
         const preset = (action.preset ?? "full") as StemPresetKind;
         const master = rhythmMasterForStem(action.deck as DeckRef, preset);
         if (master) this.alignDeckToMaster(action.deck as DeckRef, master);
-        deck.rampStemPreset(preset, Math.max(0.25, secondsPerBeat * 1.5));
+        const rampSec = Math.max(
+          secondsPerBeat * 2.5,
+          preset === "acapella" || preset === "noVocals" ? secondsPerBeat * 4 : secondsPerBeat * 2,
+        );
+        deck.rampStemPreset(preset, rampSec);
+        if (action.deck === "A" && (preset === "acapella" || preset === "noVocals")) {
+          deck.rampEqLow(-40, secondsPerBeat * 2);
+          deck.rampFilter(0.35, secondsPerBeat * 2);
+        }
+        if (action.deck === "B" && preset !== "full") {
+          this.crossfadeTo(Math.min(0.5, this.eng.crossfader.position + 0.12), secondsPerBeat * 3);
+        }
         break;
       }
     }
   }
 
-  /** Real double-drop / peak slam: bass swap on the one, then instant crossfader. */
   private executeSlam(secondsPerBeat: number): void {
     this.alignDeckToMaster("B", "A");
-    this.eng.deckA.rampEqLow(-40, secondsPerBeat * 0.4);
-    this.eng.deckA.rampFilter(0.55, secondsPerBeat * 0.35);
-    this.eng.deckB.rampEqLow(0, secondsPerBeat * 0.45);
-    this.eng.deckB.rampFilter(0, secondsPerBeat * 0.3);
-    const slamDur = Math.max(0.05, secondsPerBeat * 0.18);
+    if (!this.eng.deckB.playing) {
+      this.eng.deckB.setVolume(1, false);
+      this.eng.deckB.play();
+    }
+    this.eng.deckA.rampEqLow(-40, secondsPerBeat * 0.45);
+    this.eng.deckA.rampFilter(0.5, secondsPerBeat * 0.4);
+    this.eng.deckB.rampEqLow(0, secondsPerBeat * 0.5);
+    this.eng.deckB.rampFilter(0, secondsPerBeat * 0.35);
+    const slamDur = Math.max(0.08, secondsPerBeat * 0.22);
     this.crossfadeTo(1, slamDur);
-    this.beginTempoRestore(secondsPerBeat * 8);
+    this.beginTempoRestore(secondsPerBeat * 10);
   }
 
   private alignDeckToMaster(slave: DeckRef, master: DeckRef): void {
@@ -272,24 +315,44 @@ export class TransitionGuard {
     if (this.tempoRestoreStarted || Math.abs(this.syncRatio - 1) < 0.008) return;
     if (Math.abs(this.eng.deckB.rate - 1) < 0.008) return;
     this.tempoRestoreStarted = true;
-    const dur = Math.max(blendDurationSec * 1.15, 1.2);
+    const dur = Math.max(blendDurationSec * 1.15, 1.5);
     this.eng.deckB.glideRate(1, dur, {
       keyLock: true,
       releaseKeyLockAtEnd: true,
     });
   }
 
+  private cancelCrossfadeAnim(): void {
+    if (this.xfAnimId !== null) {
+      cancelAnimationFrame(this.xfAnimId);
+      this.xfAnimId = null;
+    }
+  }
+
   private crossfadeTo(target: number, durationSec: number): void {
+    this.cancelCrossfadeAnim();
     const xf = this.eng.crossfader;
     const start = xf.position;
     const startTime = performance.now();
+    const durMs = Math.max(80, durationSec * 1000);
     const tick = () => {
-      const raw = clamp((performance.now() - startTime) / (durationSec * 1000), 0, 1);
+      const raw = clamp((performance.now() - startTime) / durMs, 0, 1);
       const t = raw * raw * (3 - 2 * raw);
       xf.setPosition(start + (target - start) * t, false);
-      if (raw < 1) requestAnimationFrame(tick);
+      if (raw < 1) {
+        this.xfAnimId = requestAnimationFrame(tick);
+      } else {
+        this.xfAnimId = null;
+      }
     };
-    requestAnimationFrame(tick);
+    this.xfAnimId = requestAnimationFrame(tick);
+  }
+
+  private clearFx(): void {
+    this.eng.echoA.setSend(0);
+    this.eng.echoB.setSend(0);
+    this.eng.reverbA.setSend(0);
+    this.eng.reverbB.setSend(0);
   }
 
   private resetStemMix(): void {
@@ -304,26 +367,23 @@ export class TransitionGuard {
     const b = this.eng.deckB;
     const offTempo = Math.abs(b.rate - 1) > 0.008;
     if (offTempo && !this.tempoRestoreStarted) {
-      b.glideRate(1, 2.5, { keyLock: true, releaseKeyLockAtEnd: true });
+      b.glideRate(1, 3, { keyLock: true, releaseKeyLockAtEnd: true });
     } else if (!offTempo && b.keyLockEnabled) {
       b.setRate(1, false, { keyLock: false });
     }
   }
 
   finalize(): void {
+    this.cancelCrossfadeAnim();
     this.eng.crossfader.setPosition(1, true);
     this.eng.deckB.setEq({ low: 0, mid: 0, high: 0 });
     this.eng.deckB.setFilter(0);
-    this.eng.echoA.setSend(0);
-    this.eng.echoB.setSend(0);
-    this.eng.reverbA.setSend(0);
-    this.eng.reverbB.setSend(0);
+    this.clearFx();
     this.eng.deckA.setEq({ low: 0, mid: 0, high: 0 });
     this.eng.deckA.setFilter(0);
     this.resetStemMix();
     this.eng.deckA.pause();
     this.restoreDeckTempos();
-
     this.syncRatio = 1;
     this.tempoRestoreStarted = false;
     this.usesStems = false;
@@ -331,6 +391,7 @@ export class TransitionGuard {
   }
 
   reset(): void {
+    this.cancelCrossfadeAnim();
     this.eng.deckB.cancelGlideRate();
     this.syncRatio = 1;
     this.tempoRestoreStarted = false;
@@ -344,9 +405,18 @@ export class TransitionGuard {
     this.eng.deckA.setRate(1, false, { keyLock: false });
     this.eng.deckB.setRate(1, false, { keyLock: false });
     this.resetStemMix();
-    this.eng.echoA.setSend(0);
-    this.eng.echoB.setSend(0);
-    this.eng.reverbA.setSend(0);
-    this.eng.reverbB.setSend(0);
+    this.clearFx();
   }
+}
+
+/** Exported for ranking — how well two BPMs can blend with pitch lock. */
+export function blendQuality(bpmA: number, bpmB: number): number {
+  if (!bpmA || !bpmB) return 0.5;
+  const ratio = computeSyncRatio(bpmA, bpmB);
+  if (shouldBeatmatch(ratio)) return 1;
+  const dev = Math.abs(ratio - 1);
+  if (dev <= 0.06) return 0.85;
+  if (dev <= 0.1) return 0.65;
+  if (dev <= 0.15) return 0.45;
+  return 0.2;
 }

@@ -7,6 +7,7 @@ import {
   remixPhaseErrorMs,
   snapToBarDownbeat,
 } from "./remixSync";
+import { pickWeighted } from "../copilot/variety";
 
 export interface RemixCuePlan {
   bedCue: number;
@@ -231,8 +232,8 @@ export function chooseRemixCues(
   const bedOpts = bedCandidates(bed, opts);
   const layerOpts = layerCandidates(layer, opts.direction);
 
-  let best: RemixCuePlan | null = null;
   let bestScore = -Infinity;
+  const ranked: { plan: RemixCuePlan; score: number }[] = [];
 
   for (const bedPick of bedOpts) {
     const bedCue = snapToDownbeat(bedPick.time, bed.bpm, bed.beatOffset);
@@ -253,9 +254,10 @@ export function chooseRemixCues(
         (intro.bedIntroCue < bedCue - spb ? 0.06 : 0) -
         distPenalty;
 
-      if (pairScore > bestScore) {
-        bestScore = pairScore;
-        best = {
+      if (pairScore > bestScore) bestScore = pairScore;
+      ranked.push({
+        score: pairScore,
+        plan: {
           bedCue,
           layerCue,
           bedIntroCue: intro.bedIntroCue,
@@ -265,11 +267,25 @@ export function chooseRemixCues(
           syncRatio,
           effectiveLayerBpm: Math.round(effectiveLayerBpm * 10) / 10,
           direction: opts.direction,
-        };
-      }
+        },
+      });
     }
   }
 
+  const viable = ranked
+    .filter((r) => r.score >= bestScore - 0.1)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
+  if (viable.length > 0) {
+    return pickWeighted(
+      viable.map((r, i) => ({
+        item: r.plan,
+        weight: Math.max(0.15, r.score - (bestScore - 0.1) + (viable.length - i) * 0.04),
+      })),
+    );
+  }
+
+  const best = ranked.sort((a, b) => b.score - a.score)[0]?.plan;
   if (best) return best;
 
   const bedCue = snapToDownbeat(bedOpts[0]?.time ?? 0, bed.bpm, bed.beatOffset);

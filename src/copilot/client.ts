@@ -4,6 +4,7 @@ import type {
   TransitionRecipe,
 } from "./recipeTypes";
 import { buildLibrarySuggestions, recipeUsesStems } from "./transitionLibrary";
+import { shuffleSuggestionBand } from "./variety";
 
 const cache = new Map<string, CopilotResponse>();
 
@@ -93,7 +94,7 @@ export async function requestSuggestions(
       }
     : library;
 
-  return { response, source };
+  return { response: shuffleSuggestionBand(response), source };
 }
 
 /** Keep highest-impact variant when AI and catalog suggest similarly named moves. */

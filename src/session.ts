@@ -7,6 +7,7 @@ import type { TrackedHand } from "./gesture/HandTracker";
 import type { HandLabel } from "./control/ControlMapper";
 import type { TransitionRecipe } from "./copilot/recipeTypes";
 import { randomizeChoreography } from "./copilot/choreography";
+import { diversifyRecipe } from "./copilot/variety";
 import { RemixEngine } from "./remix/RemixEngine";
 
 /**
@@ -149,10 +150,11 @@ class Session {
   }
 
   prepareTransition(recipe: TransitionRecipe): void {
+    this.ensureTickLoop();
     const store = useStore.getState();
     const eng = getEngine();
     const timing = this.buildTiming(store, eng);
-    this.getCopilot().prepare(randomizeChoreography(recipe), timing);
+    this.getCopilot().prepare(diversifyRecipe(randomizeChoreography(recipe)), timing);
     const a = eng.deckA;
     const b = eng.deckB;
     useStore.setState((s) => ({

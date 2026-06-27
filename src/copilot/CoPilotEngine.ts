@@ -1,7 +1,8 @@
 import type { AudioEngine } from "../audio/AudioEngine";
 import { TransitionGuard } from "../audio/TransitionGuard";
 import type { ControlMapper } from "../control/ControlMapper";
-import type { TransitionRecipe } from "./recipeTypes";
+import { isDualGesture } from "./choreography";
+import type { TransitionRecipe, TransitionStep } from "./recipeTypes";
 
 export type StepResult = "pending" | "active" | "green" | "red";
 export type CopilotPhase = "idle" | "armed" | "running" | "complete";
@@ -12,9 +13,9 @@ export interface CopilotRuntime {
   stepIndex: number;
   results: StepResult[];
   instruction: string;
-  countdownBeats: number; // beats until the current step should fire
-  armedAtSec: number; // cueOutA, for the timeline marker
-  live: boolean; // true while the current step is in its hit window
+  countdownBeats: number;
+  armedAtSec: number;
+  live: boolean;
 }
 
 interface DeckTiming {
@@ -27,18 +28,17 @@ interface DeckTiming {
   offsetB: number;
 }
 
-// Pacing: a short preview to read the move, then a tight, competitive hit
-// window where the gesture actually counts (GREEN if hit, RED if missed).
-const MIN_STEP_GAP_SEC = 4.0; // minimum real time between consecutive prompts
-const PREVIEW_SEC = 2.5; // prompt is shown this early so you can prepare
-const HIT_BEFORE_SEC = 1.0; // green window opens this long before the cue
-const HIT_AFTER_SEC = 1.6; // green window stays open this long after the cue
+const PREVIEW_SEC = 3.5;
+const HIT_BEFORE_SEC = 1.8;
+const HIT_AFTER_SEC = 3.0;
+const MIN_HIT_WINDOW_SEC = 3.0;
+const HOLD_TO_CONFIRM_MS = 180;
 
 /**
- * Drives a transition recipe in real time using the catch-window model:
- *  - on-time gesture  => the action fires (driven by the user) -> GREEN
- *  - missed window    => the Guard completes it on beat anyway  -> RED
- * The transition always lands cleanly; green/red is a performance score.
+ * Catch-window co-pilot:
+ *  - Mix moves are driven by Song A's playhead (bars from cueOutA), never wall clock or gestures.
+ *  - Gestures only affect green/red scoring in parallel windows.
+ *  - The transition finishes on the musical timeline even if gesture windows are still open.
  */
 export class CoPilotEngine {
   private guard: TransitionGuard;
@@ -49,12 +49,12 @@ export class CoPilotEngine {
   private runtime: CopilotRuntime = blank();
   private listeners = new Set<() => void>();
 
-  private startRealMs: number | null = null;
   private secPerBeat = 0.5;
-  private barMs = 2000;
-  /** Absolute performance.now() time each step's action is scheduled for. */
-  private stepTimes: number[] = [];
-  private firing = false;
+  private barSec = 2;
+  private audioFired = new Set<number>();
+  private gestureHoldMs = new Map<number, number>();
+  private lastSampleMs = 0;
+  private completed = false;
 
   constructor(
     eng: AudioEngine,
@@ -83,10 +83,12 @@ export class CoPilotEngine {
     this.emit();
   }
 
-  /** Prime the mix and arm the co-pilot for a chosen recipe. */
   prepare(recipe: TransitionRecipe, timing: DeckTiming): void {
     this.guard.prepare(recipe, timing);
-    this.startRealMs = null;
+    this.audioFired.clear();
+    this.gestureHoldMs.clear();
+    this.lastSampleMs = 0;
+    this.completed = false;
     this.runtime = {
       phase: "armed",
       recipe,
@@ -104,136 +106,190 @@ export class CoPilotEngine {
     this.guard.reset();
     this.onCancel?.();
     this.runtime = blank();
-    this.startRealMs = null;
+    this.audioFired.clear();
+    this.gestureHoldMs.clear();
+    this.completed = false;
     this.emit();
   }
 
-  /** Called every frame while a recipe is loaded. */
   update(timing: DeckTiming): void {
     const r = this.runtime.recipe;
     if (!r || this.runtime.phase === "idle" || this.runtime.phase === "complete") return;
 
     this.secPerBeat = TransitionGuard.realSecondsPerBeat(timing.bpmA, timing.rateA);
-    this.barMs = 4 * this.secPerBeat * 1000;
+    this.barSec = 4 * this.secPerBeat;
     this.guard.setTiming(timing);
 
     if (this.runtime.phase === "armed") {
-      if (timing.positionA >= r.cueOutA) this.begin();
+      if (timing.positionA >= r.cueOutA) this.begin(timing);
       return;
     }
 
-    this.runRunning();
+    this.runRunning(timing);
   }
 
-  private begin(): void {
-    this.startRealMs = performance.now();
-    this.computeStepTimes();
+  private begin(timing: DeckTiming): void {
+    this.audioFired.clear();
+    this.gestureHoldMs.clear();
+    this.lastSampleMs = performance.now();
     this.set({ phase: "running" });
+    this.runAudio(timing);
   }
 
-  /**
-   * Lay out each step's action time. Start from its musical position, but
-   * enforce a minimum real-time gap so prompts never pile up back-to-back and
-   * the user always has several seconds to react.
-   */
-  private computeStepTimes(): void {
+  /** Bars elapsed since the transition cue on deck A. */
+  private elapsedBars(timing: DeckTiming): number {
     const r = this.runtime.recipe!;
-    const base = this.startRealMs ?? performance.now();
-    const times: number[] = [];
-    let prev = -Infinity;
-    for (const step of r.steps) {
-      const musical = base + step.atBar * this.barMs;
-      const t = Math.max(musical, prev + MIN_STEP_GAP_SEC * 1000);
-      times.push(t);
-      prev = t;
-    }
-    this.stepTimes = times;
+    if (this.barSec <= 0) return 0;
+    return (timing.positionA - r.cueOutA) / this.barSec;
   }
 
-  private runRunning(): void {
+  /** Seconds relative to when a step's mix move should land musically. */
+  private deltaSecFromStep(step: TransitionStep, timing: DeckTiming): number {
+    return (this.elapsedBars(timing) - step.atBar) * this.barSec;
+  }
+
+  private hitWindowFor(step: TransitionStep): {
+    previewSec: number;
+    hitBeforeSec: number;
+    hitAfterSec: number;
+  } {
+    const dual = isDualGesture(step.gesture);
+    return {
+      previewSec: dual ? PREVIEW_SEC + 0.6 : PREVIEW_SEC,
+      hitBeforeSec: dual ? HIT_BEFORE_SEC + 0.4 : HIT_BEFORE_SEC,
+      hitAfterSec: dual ? HIT_AFTER_SEC + 0.8 : HIT_AFTER_SEC,
+    };
+  }
+
+  private runRunning(timing: DeckTiming): void {
+    if (this.completed) return;
+
     const r = this.runtime.recipe!;
-    const i = this.runtime.stepIndex;
-    if (i >= r.steps.length) {
-      this.complete();
-      return;
-    }
-    const step = r.steps[i];
-    const scheduled = this.stepTimes[i] ?? performance.now();
     const now = performance.now();
-    const appear = scheduled - PREVIEW_SEC * 1000;
-    const hitStart = scheduled - HIT_BEFORE_SEC * 1000;
-    // Hit window stays open after the cue, but never overlaps the next preview.
-    const nextAppear =
-      i + 1 < this.stepTimes.length ? this.stepTimes[i + 1] - PREVIEW_SEC * 1000 : Infinity;
-    const hitEnd = Math.min(scheduled + HIT_AFTER_SEC * 1000, nextAppear - 150);
-    const countdownBeats = (scheduled - now) / (this.secPerBeat * 1000);
+    const dt = this.lastSampleMs ? now - this.lastSampleMs : 16;
+    this.lastSampleMs = now;
 
-    if (now < appear) {
-      // Not visible yet: keep the previous prompt up so nothing stacks.
-      return;
-    }
+    // --- 1) Mix: always tied to Song A playhead ---
+    this.runAudio(timing);
 
-    if (now < hitStart) {
-      // Preview phase: show the upcoming move with a countdown, not yet live.
-      this.updateStepView(i, "active", step.instruction, countdownBeats, false);
-      return;
-    }
+    // --- 2) Score gestures in parallel (never blocks audio) ---
+    const results = [...this.runtime.results];
+    for (let si = 0; si < r.steps.length; si++) {
+      if (results[si] === "green" || results[si] === "red") continue;
 
-    if (now <= hitEnd) {
-      // Live hit window: the gesture counts now.
-      this.updateStepView(i, "active", step.instruction, countdownBeats, true);
-      if (this.mapper.isPerforming(step.gesture)) {
-        this.fire(step.index, "green");
+      const step = r.steps[si];
+      const delta = this.deltaSecFromStep(step, timing);
+      const { hitBeforeSec, hitAfterSec } = this.hitWindowFor(step);
+      const hitEndSec = Math.max(hitAfterSec, MIN_HIT_WINDOW_SEC - hitBeforeSec);
+
+      if (delta < -hitBeforeSec) continue;
+
+      if (delta <= hitEndSec) {
+        const prev = this.gestureHoldMs.get(si) ?? 0;
+        const hold = this.mapper.isPerforming(step.gesture)
+          ? prev + dt
+          : Math.max(0, prev - dt * 0.25);
+        this.gestureHoldMs.set(si, hold);
+        if (hold >= HOLD_TO_CONFIRM_MS) {
+          results[si] = "green";
+        }
+      } else {
+        results[si] = "red";
       }
-      return;
     }
 
-    // Window passed without the gesture: auto-complete cleanly.
-    this.fire(step.index, "red");
-  }
+    const focus = this.focusStepIndex(timing);
+    const step = r.steps[focus];
+    const delta = this.deltaSecFromStep(step, timing);
+    const { previewSec, hitBeforeSec, hitAfterSec } = this.hitWindowFor(step);
+    const hitEndSec = Math.max(hitAfterSec, MIN_HIT_WINDOW_SEC - hitBeforeSec);
+    const countdownBeats = (-delta) / this.secPerBeat;
+    const live = delta >= -hitBeforeSec && delta <= hitEndSec;
 
-  private fire(stepIndex: number, result: Exclude<StepResult, "pending" | "active">): void {
-    if (this.firing) return;
-    this.firing = true;
-    const r = this.runtime.recipe!;
-    const step = r.steps[stepIndex];
-    this.guard.execute(step.action, this.secPerBeat);
-    const results = [...this.runtime.results];
-    results[stepIndex] = result;
-    this.set({ results, stepIndex: stepIndex + 1, live: false });
-    this.firing = false;
-  }
+    const displayResults = [...results];
+    if (displayResults[focus] === "pending" && delta >= -previewSec) {
+      displayResults[focus] = "active";
+    }
 
-  private updateStepView(
-    index: number,
-    result: StepResult,
-    instruction: string,
-    countdownBeats: number,
-    live: boolean,
-  ): void {
-    const results = [...this.runtime.results];
-    if (results[index] === "pending") results[index] = result;
     this.set({
-      results,
-      instruction,
+      results: displayResults,
+      stepIndex: focus,
+      instruction: step.instruction,
       countdownBeats: Math.max(0, countdownBeats),
-      stepIndex: index,
       live,
     });
+
+    // --- 3) End on musical length, not gesture completion ---
+    const elapsed = this.elapsedBars(timing);
+    if (elapsed >= r.bars + 1) {
+      this.complete();
+    }
+  }
+
+  /** Fire every due mix move — independent of gesture state. */
+  private runAudio(timing: DeckTiming): void {
+    const r = this.runtime.recipe!;
+    const elapsed = this.elapsedBars(timing);
+    for (let si = 0; si < r.steps.length; si++) {
+      if (elapsed + 0.04 >= r.steps[si].atBar) {
+        this.fireStepAudio(r.steps[si], si);
+      }
+    }
+  }
+
+  private focusStepIndex(timing: DeckTiming): number {
+    const r = this.runtime.recipe!;
+    let best = 0;
+    let bestDist = Infinity;
+
+    for (let si = 0; si < r.steps.length; si++) {
+      const delta = this.deltaSecFromStep(r.steps[si], timing);
+      const { previewSec, hitAfterSec } = this.hitWindowFor(r.steps[si]);
+      const hitEndSec = Math.max(hitAfterSec, MIN_HIT_WINDOW_SEC - HIT_BEFORE_SEC);
+      if (delta >= -previewSec && delta <= hitEndSec + 0.4) {
+        const dist = Math.abs(delta);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = si;
+        }
+      }
+    }
+    if (bestDist < Infinity) return best;
+
+    for (let si = 0; si < r.steps.length; si++) {
+      if (this.elapsedBars(timing) <= r.steps[si].atBar + 0.25) return si;
+    }
+    return Math.max(0, r.steps.length - 1);
+  }
+
+  private fireStepAudio(step: TransitionStep, index: number): void {
+    if (this.audioFired.has(index)) return;
+    this.guard.execute(step.action, this.secPerBeat);
+    this.audioFired.add(index);
   }
 
   private complete(): void {
+    if (this.completed) return;
+    this.completed = true;
+
+    const results = this.runtime.results.map((r) =>
+      r === "green" || r === "red" ? r : "red",
+    );
+
     this.guard.finalize();
     this.onComplete?.();
-    const greens = this.runtime.results.filter((r) => r === "green").length;
-    const total = this.runtime.results.length;
+
+    const greens = results.filter((r) => r === "green").length;
+    const total = results.length;
     const pct = total ? Math.round((greens / total) * 100) : 0;
     const scoreLine =
       total > 0
         ? `${greens}/${total} on time (${pct}%) — ${pct >= 80 ? "crushed it!" : pct >= 50 ? "solid mix." : "keep practicing!"}`
         : "nicely done!";
+
     this.set({
       phase: "complete",
+      results,
       instruction: `Transition complete — ${scoreLine}`,
       live: false,
     });

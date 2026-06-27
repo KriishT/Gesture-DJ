@@ -6,7 +6,10 @@ import type {
   TransitionStep,
 } from "./recipeTypes";
 import { defaultGesture, instructionFor, isDualGesture } from "./choreography";
+import { chooseEntry, chooseExit } from "./variety";
 import { chooseDoubleDropCues, snapToDownbeat } from "../audio/beatAlign";
+import { blendQuality } from "../audio/TransitionGuard";
+import { layoutSteps, polishSteps } from "./transitionMix";
 
 /**
  * A large catalog (30+) of crowd-flipping transitions built from composable
@@ -151,6 +154,20 @@ const acapellaB = (atBar: number): Move => ({
 
 const h = (len: number, frac: number) => Math.round(len * frac);
 
+/** Phrase-aligned move layout — prevents FX piling up on the same bar. */
+function L(
+  len: number,
+  items: { frac: number; minGap?: number; move: () => Omit<Move, "atBar"> }[],
+): Move[] {
+  return layoutSteps(
+    len,
+    items.map(({ frac, minGap, move }) => {
+      const m = move();
+      return { atBar: h(len, frac), minGap, action: m.action, verb: m.verb };
+    }),
+  );
+}
+
 // --- techniques ------------------------------------------------------------
 const TECHNIQUES: TechSpec[] = [
   {
@@ -162,7 +179,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [8, 16, 24],
-    build: (len) => [playB(), bringB(h(len, 0.15), h(len, 0.35), 0.48), killBassA(h(len, 0.5)), restoreBassB(h(len, 0.52)), bringB(h(len, 0.78), h(len, 0.22))],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.35), 0.42) },
+        { frac: 0.38, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.5, move: () => restoreBassB(0) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "remix-layer",
@@ -173,7 +197,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [playB(), layerB(0, h(len, 0.7)), killBassA(h(len, 0.4)), restoreBassB(h(len, 0.4)), bringB(h(len, 0.7), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => layerB(0, h(len, 0.65)) },
+        { frac: 0.35, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.48, move: () => restoreBassB(0) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "filter-hp",
@@ -184,7 +215,13 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [12, 16, 24],
-    build: (len) => [playB(), hpA(0, len), bringB(h(len, 0.25), len), bringB(h(len, 0.75), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.55), 0.38) },
+        { frac: 0.28, move: () => hpA(0, h(len, 0.45)) },
+        { frac: 0.68, move: () => bringB(0, h(len, 0.32)) },
+      ]),
   },
   {
     key: "filter-lp",
@@ -195,7 +232,13 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [16, 24],
-    build: (len) => [playB(), bringB(0, len), lpA(h(len, 0.25), len), bringB(h(len, 0.8), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.5), 0.35) },
+        { frac: 0.32, move: () => lpA(0, h(len, 0.45)) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "echo-slam",
@@ -206,14 +249,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [8],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.15), h(len, 0.25), 0.35),
-      echoA(h(len, 0.55)),
-      killBassA(h(len, 0.5)),
-      restoreBassB(h(len, 0.65)),
-      slamB(h(len, 0.78)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.22), 0.32) },
+        { frac: 0.38, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.48, move: () => echoA(0) },
+        { frac: 0.62, move: () => restoreBassB(0) },
+        { frac: 0.78, minGap: 1, move: () => slamB(0) },
+      ]),
   },
   {
     key: "reverb-wash",
@@ -224,7 +268,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [12, 16],
-    build: (len) => [playB(), reverbA(h(len, 0.4), h(len, 0.5)), killBassA(h(len, 0.5)), bringB(h(len, 0.6), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.15, move: () => bringB(0, h(len, 0.4), 0.38) },
+        { frac: 0.38, minGap: 0.75, move: () => reverbA(0, h(len, 0.45)) },
+        { frac: 0.52, move: () => killBassA(0) },
+        { frac: 0.68, move: () => bringB(0, h(len, 0.32)) },
+      ]),
   },
   {
     key: "double-drop",
@@ -235,14 +286,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.1), h(len, 0.2), 0.32),
-      riserA(h(len, 0.22), h(len, 0.38)),
-      killBassA(h(len, 0.52)),
-      restoreBassB(h(len, 0.72)),
-      slamB(h(len, 0.88)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => bringB(0, h(len, 0.18), 0.28) },
+        { frac: 0.22, move: () => riserA(0, h(len, 0.35)) },
+        { frac: 0.48, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.62, move: () => restoreBassB(0) },
+        { frac: 0.82, minGap: 1, move: () => slamB(0) },
+      ]),
   },
   {
     key: "tape-stop",
@@ -253,14 +305,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [8],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.12), h(len, 0.2), 0.3),
-      killBassA(h(len, 0.45)),
-      brakeA(h(len, 0.58)),
-      restoreBassB(h(len, 0.72)),
-      slamB(h(len, 0.82)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.2), 0.28) },
+        { frac: 0.38, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.52, minGap: 1, move: () => brakeA(0) },
+        { frac: 0.65, move: () => restoreBassB(0) },
+        { frac: 0.78, minGap: 1, move: () => slamB(0) },
+      ]),
   },
   {
     key: "spinback",
@@ -271,7 +324,12 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [4],
-    build: (len) => [playB(), spinbackA(h(len, 0.5)), cutB(h(len, 0.6))],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.42, minGap: 1, move: () => spinbackA(0) },
+        { frac: 0.58, minGap: 1, move: () => cutB(0) },
+      ]),
   },
   {
     key: "trance-gate",
@@ -282,7 +340,13 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [playB(), gateA(h(len, 0.4), h(len, 0.4)), bringB(h(len, 0.3), len), bringB(h(len, 0.8), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.45), 0.38) },
+        { frac: 0.32, minGap: 1, move: () => gateA(0, h(len, 0.35)) },
+        { frac: 0.68, move: () => bringB(0, h(len, 0.32)) },
+      ]),
   },
   {
     key: "gate-cut",
@@ -293,7 +357,13 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [8],
-    build: (len) => [playB(), gateA(h(len, 0.4), h(len, 0.5)), cutB(h(len, 0.7))],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.15, move: () => bringB(0, h(len, 0.25), 0.35) },
+        { frac: 0.38, minGap: 1, move: () => gateA(0, h(len, 0.4)) },
+        { frac: 0.62, minGap: 1, move: () => cutB(0) },
+      ]),
   },
   {
     key: "tension-riser",
@@ -304,7 +374,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [playB(), riserA(0, h(len, 0.6)), killBassA(h(len, 0.55)), bringB(h(len, 0.6), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => bringB(0, h(len, 0.4), 0.35) },
+        { frac: 0.28, move: () => riserA(0, h(len, 0.4)) },
+        { frac: 0.52, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.68, move: () => bringB(0, h(len, 0.32)) },
+      ]),
   },
   {
     key: "vocal-tease",
@@ -315,7 +392,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [playB(), bringB(0, len, 0.6), hpA(h(len, 0.3), h(len, 0.5)), killBassA(h(len, 0.55)), bringB(h(len, 0.8), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.45), 0.48) },
+        { frac: 0.32, move: () => hpA(0, h(len, 0.35)) },
+        { frac: 0.48, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "long-blend",
@@ -326,7 +410,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [24, 32],
-    build: (len) => [playB(), bringB(0, len, 0.5), hpA(h(len, 0.3), h(len, 0.4)), killBassA(h(len, 0.5)), restoreBassB(h(len, 0.5)), bringB(h(len, 0.8), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => bringB(0, h(len, 0.55), 0.42) },
+        { frac: 0.28, move: () => hpA(0, h(len, 0.35)) },
+        { frac: 0.45, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.52, move: () => restoreBassB(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "build-slam",
@@ -337,15 +429,16 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [16],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.12), h(len, 0.22), 0.35),
-      gateA(h(len, 0.28), h(len, 0.35)),
-      riserA(h(len, 0.35), h(len, 0.35)),
-      killBassA(h(len, 0.58)),
-      restoreBassB(h(len, 0.72)),
-      slamB(h(len, 0.85)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => bringB(0, h(len, 0.2), 0.3) },
+        { frac: 0.22, minGap: 1, move: () => gateA(0, h(len, 0.3)) },
+        { frac: 0.35, move: () => riserA(0, h(len, 0.3)) },
+        { frac: 0.52, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.65, move: () => restoreBassB(0) },
+        { frac: 0.82, minGap: 1, move: () => slamB(0) },
+      ]),
   },
   {
     key: "echo-gate",
@@ -356,15 +449,16 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [12],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.12), h(len, 0.22), 0.32),
-      gateA(h(len, 0.25), h(len, 0.3)),
-      echoA(h(len, 0.48)),
-      killBassA(h(len, 0.52)),
-      restoreBassB(h(len, 0.65)),
-      slamB(h(len, 0.78)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.1, move: () => bringB(0, h(len, 0.2), 0.3) },
+        { frac: 0.28, minGap: 1, move: () => gateA(0, h(len, 0.28)) },
+        { frac: 0.42, minGap: 1, move: () => echoA(0) },
+        { frac: 0.52, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.62, move: () => restoreBassB(0) },
+        { frac: 0.78, minGap: 1, move: () => slamB(0) },
+      ]),
   },
   {
     key: "eq-trade",
@@ -375,7 +469,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [playB(), bringB(0, len, 0.5), killBassA(h(len, 0.35)), restoreBassB(h(len, 0.35)), hpA(h(len, 0.6), h(len, 0.4)), bringB(h(len, 0.85), len)],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.08, move: () => bringB(0, h(len, 0.45), 0.42) },
+        { frac: 0.32, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.42, move: () => restoreBassB(0) },
+        { frac: 0.58, move: () => hpA(0, h(len, 0.32)) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "cut-on-drop",
@@ -386,13 +488,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [4],
-    build: (len) => [
-      playB(),
-      bringB(h(len, 0.15), h(len, 0.25), 0.4),
-      killBassA(h(len, 0.5)),
-      restoreBassB(h(len, 0.62)),
-      cutB(h(len, 0.75)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.22), 0.38) },
+        { frac: 0.42, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.55, move: () => restoreBassB(0) },
+        { frac: 0.72, minGap: 1, move: () => cutB(0) },
+      ]),
   },
   {
     key: "stem-acapella",
@@ -403,14 +506,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [
-      playB(),
-      instB(0),
-      bringB(h(len, 0.15), h(len, 0.35), 0.45),
-      acapellaA(h(len, 0.45)),
-      killBassA(h(len, 0.62)),
-      bringB(h(len, 0.82), h(len, 0.18)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => instB(0) },
+        { frac: 0.15, move: () => bringB(0, h(len, 0.32), 0.4) },
+        { frac: 0.42, minGap: 1, move: () => acapellaA(0) },
+        { frac: 0.58, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "stem-drums-layer",
@@ -421,14 +525,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      drumsB(0),
-      bringB(h(len, 0.2), h(len, 0.35), 0.42),
-      killBassA(h(len, 0.52)),
-      restoreBassB(h(len, 0.58)),
-      bringB(h(len, 0.82), h(len, 0.18)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => drumsB(0) },
+        { frac: 0.18, move: () => bringB(0, h(len, 0.32), 0.38) },
+        { frac: 0.48, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.58, move: () => restoreBassB(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "stem-bass-tease",
@@ -439,13 +544,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      bassBStem(0),
-      bringB(h(len, 0.35), len, 0.45),
-      killBassA(h(len, 0.5)),
-      bringB(h(len, 0.75), len),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => bassBStem(0) },
+        { frac: 0.28, move: () => bringB(0, h(len, 0.4), 0.4) },
+        { frac: 0.48, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "stem-guitar-float",
@@ -456,13 +562,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [
-      playB(),
-      guitarB(0),
-      bringB(0, len, 0.4),
-      hpA(h(len, 0.45), h(len, 0.35)),
-      bringB(h(len, 0.7), len),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => guitarB(0) },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.45), 0.35) },
+        { frac: 0.42, move: () => hpA(0, h(len, 0.32)) },
+        { frac: 0.68, move: () => bringB(0, h(len, 0.32)) },
+      ]),
   },
   {
     key: "stem-piano-layer",
@@ -473,13 +580,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: true,
     lens: [16, 24],
-    build: (len) => [
-      playB(),
-      pianoB(0),
-      layerB(h(len, 0.2), h(len, 0.35)),
-      acapellaA(h(len, 0.45)),
-      bringB(h(len, 0.82), h(len, 0.18)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => pianoB(0) },
+        { frac: 0.18, move: () => layerB(0, h(len, 0.32)) },
+        { frac: 0.42, minGap: 1, move: () => acapellaA(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "stem-vocal-guitar",
@@ -490,13 +598,14 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [16],
-    build: (len) => [
-      playB(),
-      guitarB(0),
-      bringB(h(len, 0.15), h(len, 0.3), 0.38),
-      acapellaA(h(len, 0.42)),
-      bringB(h(len, 0.82), h(len, 0.18)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => guitarB(0) },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.28), 0.35) },
+        { frac: 0.38, minGap: 1, move: () => acapellaA(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
   {
     key: "stem-acapella-swap",
@@ -507,15 +616,16 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      instB(0),
-      bringB(h(len, 0.12), h(len, 0.28), 0.42),
-      acapellaA(h(len, 0.38)),
-      noVocalsA(h(len, 0.58)),
-      acapellaB(h(len, 0.68)),
-      bringB(h(len, 0.85), h(len, 0.15)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => instB(0) },
+        { frac: 0.12, move: () => bringB(0, h(len, 0.25), 0.38) },
+        { frac: 0.35, minGap: 1, move: () => acapellaA(0) },
+        { frac: 0.52, minGap: 1, move: () => noVocalsA(0) },
+        { frac: 0.65, minGap: 1, move: () => acapellaB(0) },
+        { frac: 0.82, move: () => bringB(0, h(len, 0.18)) },
+      ]),
   },
   {
     key: "stem-instrumental-bridge",
@@ -526,14 +636,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: true,
     keySensitive: false,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      instB(0),
-      noVocalsA(h(len, 0.15)),
-      bringB(h(len, 0.35), len, 0.55),
-      echoA(h(len, 0.55)),
-      bringB(h(len, 0.75), len),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => instB(0) },
+        { frac: 0.15, minGap: 1, move: () => noVocalsA(0) },
+        { frac: 0.32, move: () => bringB(0, h(len, 0.4), 0.5) },
+        { frac: 0.52, minGap: 1, move: () => echoA(0) },
+        { frac: 0.72, move: () => bringB(0, h(len, 0.28)) },
+      ]),
   },
   {
     key: "stem-drums-acapella",
@@ -544,14 +655,15 @@ const TECHNIQUES: TechSpec[] = [
     vocalSafe: false,
     keySensitive: true,
     lens: [12, 16],
-    build: (len) => [
-      playB(),
-      drumsB(0),
-      bringB(h(len, 0.2), h(len, 0.3), 0.42),
-      acapellaA(h(len, 0.38)),
-      killBassA(h(len, 0.55)),
-      bringB(h(len, 0.82), h(len, 0.18)),
-    ],
+    build: (len) =>
+      L(len, [
+        { frac: 0, move: playB },
+        { frac: 0.05, minGap: 1, move: () => drumsB(0) },
+        { frac: 0.18, move: () => bringB(0, h(len, 0.28), 0.38) },
+        { frac: 0.35, minGap: 1, move: () => acapellaA(0) },
+        { frac: 0.52, minGap: 0.75, move: () => killBassA(0) },
+        { frac: 0.78, move: () => bringB(0, h(len, 0.22)) },
+      ]),
   },
 ];
 
@@ -563,7 +675,7 @@ function variantName(name: string, len: number, lens: number[]): string {
 
 function toRecipe(spec: TechSpec, len: number, cueOutA: number, cueInB: number): TransitionRecipe {
   const moves = spec.build(len).sort((a, b) => a.atBar - b.atBar);
-  const steps: TransitionStep[] = moves.map((m, i) => {
+  const rawSteps: TransitionStep[] = moves.map((m, i) => {
     const gesture = defaultGesture(m.action);
     return {
       index: i,
@@ -575,6 +687,7 @@ function toRecipe(spec: TechSpec, len: number, cueOutA: number, cueInB: number):
       instruction: instructionFor(gesture, m.verb),
     };
   });
+  const steps = polishSteps(rawSteps, len);
   return {
     id: `${spec.key}-${len}`,
     name: variantName(spec.name, len, spec.lens),
@@ -588,21 +701,7 @@ function toRecipe(spec: TechSpec, len: number, cueOutA: number, cueInB: number):
 }
 
 // --- cue-point selection ---------------------------------------------------
-export function chooseExit(a: TrackAnalysis): number {
-  const lateDrop = a.drops.filter((d) => d > a.durationSec * 0.4).pop();
-  if (lateDrop) return lateDrop;
-  const bd = a.sections.find(
-    (s) => s.start > a.durationSec * 0.5 && (s.kind === "breakdown" || s.kind === "outro"),
-  );
-  if (bd) return bd.start;
-  return Math.max(8, a.durationSec * 0.6);
-}
-
-export function chooseEntry(b: TrackAnalysis): number {
-  const firstDrop = b.drops[0];
-  const build = b.sections.find((s) => s.kind === "build" || s.kind === "drop");
-  return Math.max(0, firstDrop ?? build?.start ?? 0);
-}
+export { chooseExit, chooseEntry } from "./variety";
 
 function chooseDropEntry(b: TrackAnalysis): number {
   const drop = b.drops.find((d) => d > 4) ?? b.sections.find((s) => s.kind === "drop")?.start;
@@ -628,6 +727,64 @@ function circ(a: number, b: number): number {
   return Math.min(d, 12 - d);
 }
 
+/** Rank how well this technique fits the pair — prioritises clean sound over gimmicks. */
+function scoreTechnique(
+  spec: TechSpec,
+  len: number,
+  ctx: { harmonic: boolean; bpmGap: number; vocalHeavy: boolean; stemsReady: boolean; blend: number },
+): number {
+  const isStem = spec.key.startsWith("stem-");
+  let impact = 0.52;
+
+  if (ctx.bpmGap <= 2) impact += 0.2;
+  else if (ctx.bpmGap <= 4) impact += 0.14;
+  else if (ctx.bpmGap <= 6) impact += 0.05;
+  else if (ctx.bpmGap <= 8) impact -= 0.06;
+  else impact -= 0.22;
+
+  impact += (ctx.blend - 0.5) * 0.22;
+
+  if (spec.keySensitive) impact += ctx.harmonic ? 0.18 : -0.22;
+  else if (ctx.harmonic) impact += 0.07;
+
+  if (spec.energy === "slam") {
+    impact += ctx.bpmGap <= 3 ? 0.12 : ctx.bpmGap > 7 ? -0.24 : -0.08;
+  }
+  if (spec.energy === "smooth" || spec.energy === "lift") {
+    impact += ctx.bpmGap <= 8 ? 0.1 : 0.04;
+  }
+
+  if (ctx.vocalHeavy) {
+    if (spec.vocalSafe) impact += 0.1;
+    else if (!isStem) impact -= 0.12;
+  }
+
+  if (isStem) {
+    if (!ctx.stemsReady) return 0.12;
+    impact += 0.06;
+    if (ctx.bpmGap > 6) impact -= 0.2;
+    if (ctx.bpmGap > 10) impact -= 0.22;
+    if (spec.key.includes("acapella") && ctx.vocalHeavy && ctx.bpmGap <= 5) impact += 0.14;
+    if (!ctx.harmonic) impact -= 0.12;
+    if (spec.key === "stem-drums-acapella" || spec.key === "stem-vocal-guitar") {
+      impact += ctx.bpmGap <= 4 && ctx.harmonic ? 0.1 : -0.18;
+    }
+  } else {
+    if (spec.key === "bass-swap" && ctx.bpmGap <= 6) impact += 0.16;
+    if (spec.key === "filter-hp" || spec.key === "filter-lp") impact += ctx.bpmGap <= 8 ? 0.1 : 0;
+    if (spec.key === "long-blend" && ctx.bpmGap > 4) impact += 0.12;
+    if (spec.key === "echo-slam" || spec.key === "echo-gate") impact += ctx.vocalHeavy ? 0.08 : 0.04;
+    if (spec.key === "remix-layer" && ctx.harmonic) impact += 0.1;
+    if (ctx.stemsReady && ctx.bpmGap > 9) impact += 0.14;
+  }
+
+  if (len >= 16 && spec.energy === "smooth") impact += 0.05;
+  if (len <= 8 && spec.energy === "slam" && ctx.bpmGap <= 4) impact += 0.05;
+
+  impact += (Math.random() - 0.5) * 0.06;
+  return Math.max(0.12, Math.min(0.96, impact));
+}
+
 /**
  * Build the full catalog ranked for this pairing. Returns 30+ suggestions so
  * the user always has a big, fresh menu to choose from.
@@ -637,13 +794,12 @@ export function buildLibrarySuggestions(
   b: TrackAnalysis,
   opts: { stemsA?: boolean; stemsB?: boolean } = {},
 ): CopilotResponse {
-  const cueOutRaw = chooseExit(a);
-  const cueInRaw = chooseEntry(b);
   const dropEntry = chooseDropEntry(b);
   const dropB =
-    b.drops.find((d) => d > 4) ?? b.sections.find((s) => s.kind === "drop")?.start ?? cueInRaw;
+    b.drops.find((d) => d > 4) ?? b.sections.find((s) => s.kind === "drop")?.start ?? chooseEntry(b);
   const harmonic = keyCompatible(a.camelotKey, b.camelotKey);
   const bpmGap = Math.abs(a.bpm - b.bpm);
+  const blend = blendQuality(a.bpm, b.bpm);
   const vocalHeavy = (a.vocalProbability + b.vocalProbability) / 2 > 0.5;
   const stemsReady = Boolean(opts.stemsA && opts.stemsB);
 
@@ -651,8 +807,8 @@ export function buildLibrarySuggestions(
     spec.lens.map((len) => {
       const isDoubleDrop = spec.key === "double-drop";
       const isSlamMove = spec.energy === "slam";
-      let cueOutA = snapToDownbeat(cueOutRaw, a.bpm, a.beatOffset);
-      let cueInB = snapToDownbeat(cueInRaw, b.bpm, b.beatOffset);
+      let cueOutA = snapToDownbeat(chooseExit(a), a.bpm, a.beatOffset);
+      let cueInB = snapToDownbeat(chooseEntry(b), b.bpm, b.beatOffset);
 
       if (isDoubleDrop) {
         const pair = chooseDoubleDropCues(
@@ -671,21 +827,8 @@ export function buildLibrarySuggestions(
       }
 
       const recipe = toRecipe(spec, len, cueOutA, cueInB);
-      const isStem = spec.key.startsWith("stem-");
-
-      let impact = 0.6;
-      if (isStem) {
-        impact += stemsReady ? 0.38 : -0.45;
-        if (bpmGap > 6 && stemsReady) impact += 0.12;
-      }
-      if (spec.keySensitive) impact += harmonic ? 0.22 : -0.12;
-      if (spec.energy === "slam") impact += bpmGap <= 4 ? 0.12 : bpmGap > 8 ? -0.18 : -0.04;
-      if (spec.energy === "smooth") impact += bpmGap > 6 ? 0.14 : 0.04;
-      if (!spec.vocalSafe && vocalHeavy && !isStem) impact -= 0.12;
-      if (spec.vocalSafe && vocalHeavy) impact += 0.06;
-      if (stemsReady && spec.key === "bass-swap" && bpmGap > 8) impact -= 0.08;
-      impact += (len >= 16 ? 0.03 : 0) - Math.random() * 0.04;
-      return { impact: Math.max(0.2, Math.min(0.98, impact)), recipe };
+      const impact = scoreTechnique(spec, len, { harmonic, bpmGap, vocalHeavy, stemsReady, blend });
+      return { impact, recipe };
     }),
   ).sort((x, y) => y.impact - x.impact);
 
