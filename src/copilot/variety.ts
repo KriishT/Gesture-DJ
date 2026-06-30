@@ -1,5 +1,6 @@
 import type { CopilotResponse, StepAction, TrackAnalysis, TransitionRecipe } from "./recipeTypes";
 import { snapToDownbeat } from "../audio/beatAlign";
+import { compareSuggestionRank } from "./transitionLibrary";
 
 export function pickWeighted<T>(items: { item: T; weight: number }[]): T {
   if (items.length === 0) throw new Error("pickWeighted: empty");
@@ -15,14 +16,17 @@ export function pickWeighted<T>(items: { item: T; weight: number }[]): T {
 
 /** Lightly shuffle the top band so the menu feels fresh each session. */
 export function shuffleSuggestionBand(response: CopilotResponse, band = 14): CopilotResponse {
-  const head = response.suggestions.slice(0, band);
-  const tail = response.suggestions.slice(band);
+  const nonStem = response.suggestions.filter((s) => !s.recipe.steps.some((st) => st.action.type === "stemPreset"));
+  const stem = response.suggestions.filter((s) => s.recipe.steps.some((st) => st.action.type === "stemPreset"));
+  const head = nonStem.slice(0, band);
+  const tail = [...nonStem.slice(band), ...stem];
   for (let i = head.length - 1; i > 0; i--) {
     if (Math.random() > 0.55) continue;
     const j = Math.floor(Math.random() * (i + 1));
     [head[i], head[j]] = [head[j], head[i]];
   }
-  head.sort((a, b) => b.impact - a.impact);
+  head.sort(compareSuggestionRank);
+  tail.sort(compareSuggestionRank);
   return { ...response, suggestions: [...head, ...tail] };
 }
 

@@ -13,6 +13,8 @@ export function WaveformRig() {
   const copilot = useCopilot();
   const recipe = copilot.recipe;
 
+  if (!deckA.hasTrack && !deckB.hasTrack) return null;
+
   return (
     <div className="waveform-rig">
       <div className="wave-col A">

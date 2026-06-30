@@ -3,7 +3,8 @@ import type {
   TrackAnalysis,
   TransitionRecipe,
 } from "./recipeTypes";
-import { buildLibrarySuggestions, recipeUsesStems } from "./transitionLibrary";
+import { apiUrl } from "../config/apiBase";
+import { buildLibrarySuggestions, compareSuggestionRank, recipeUsesStems } from "./transitionLibrary";
 import { shuffleSuggestionBand } from "./variety";
 
 const cache = new Map<string, CopilotResponse>();
@@ -60,7 +61,7 @@ export async function requestSuggestions(
 
   if (!aiPicks) {
     try {
-      const res = await fetch("/api/copilot", {
+      const res = await fetch(apiUrl("/api/copilot"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -105,7 +106,7 @@ function dedupeSuggestions(list: CopilotResponse["suggestions"]): CopilotRespons
     const prev = seen.get(key);
     if (!prev || s.impact > prev.impact) seen.set(key, s);
   }
-  return [...seen.values()].sort((a, b) => b.impact - a.impact);
+  return [...seen.values()].sort(compareSuggestionRank);
 }
 
 export { recipeUsesStems };
@@ -129,7 +130,7 @@ function normalize(
     ...data,
     suggestions: data.suggestions
       .map((s) => ({ ...s, recipe: fix(s.recipe) }))
-      .sort((x, y) => y.impact - x.impact),
+      .sort(compareSuggestionRank),
   };
 }
 

@@ -32,6 +32,10 @@ export function DeckView({ id }: { id: DeckId }) {
   const setStemPreset = useStore((s) => s.setStemPreset);
   const toggleStem = useStore((s) => s.toggleStem);
   const padMode = useStore((s) => s.padMode);
+  const stemBackendMode = useStore((s) => s.stemBackendMode);
+  const stemBackendInfo = useStore((s) => s.stemBackendInfo);
+  const setStemBackendMode = useStore((s) => s.setStemBackendMode);
+  const retryStems = useStore((s) => s.retryStems);
 
   const [drag, setDrag] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -70,7 +74,10 @@ export function DeckView({ id }: { id: DeckId }) {
         <div className={`stem-bar ${deck.stemsStatus}`}>
           {deck.stemsStatus === "processing" && (
             <>
-              <span>Separating stems… {Math.round(deck.stemsProgress * 100)}%</span>
+              <span>
+                Separating stems
+                {deck.stemsGpu ? ` on ${deck.stemsGpu}` : ""}… {Math.round(deck.stemsProgress * 100)}%
+              </span>
               {deck.stemsElapsedSec != null && (
                 <span className="stem-time">{deck.stemsElapsedSec.toFixed(1)}s</span>
               )}
@@ -79,16 +86,36 @@ export function DeckView({ id }: { id: DeckId }) {
           {deck.stemsStatus === "ready" && (
             <span>
               ✓ 6 stems ready
-              {deck.stemsElapsedSec != null ? ` (${deck.stemsElapsedSec.toFixed(1)}s)` : ""}
+              {deck.stemsGpu ? ` (${deck.stemsGpu})` : ""}
+              {deck.stemsElapsedSec != null ? ` — ${deck.stemsElapsedSec.toFixed(1)}s` : ""}
             </span>
           )}
           {deck.stemsStatus === "unavailable" && (
-            <span title={deck.stemsError ?? undefined}>
-              Stems need GPU setup — see docs/STEMS_SETUP.md
+            <span className="stem-bar-msg" title={deck.stemsError ?? undefined}>
+              Stems unavailable — try Cloud in the top bar or see docs/STEMS_SETUP.md
             </span>
           )}
           {deck.stemsStatus === "error" && (
-            <span title={deck.stemsError ?? undefined}>Stem error</span>
+            <div className="stem-bar-error">
+              <span title={deck.stemsError ?? undefined}>
+                {deck.stemsError?.startsWith("Local GPU failed") ? "GPU stem error" : "Stem error"}
+              </span>
+              {stemBackendInfo?.cloud && stemBackendMode !== "cloud" && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={() => {
+                    setStemBackendMode("cloud");
+                    retryStems(id);
+                  }}
+                >
+                  Retry via Replicate
+                </button>
+              )}
+              <button type="button" className="btn ghost sm" onClick={() => retryStems(id)}>
+                Retry
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -116,7 +143,7 @@ export function DeckView({ id }: { id: DeckId }) {
               </div>
 
               <div className="fader-col">
-                <Fader value={deck.volume} color={ACCENT} onChange={(v) => setVolume(id, v)} height={120} />
+                <Fader value={deck.volume} color={ACCENT} onChange={(v) => setVolume(id, v)} height={78} />
                 <span className="fader-label">VOL</span>
               </div>
             </div>
@@ -239,9 +266,9 @@ export function DeckView({ id }: { id: DeckId }) {
             <div>Analyzing track…</div>
           ) : (
             <div>
-              <div style={{ fontSize: 28, marginBottom: 6 }}>＋</div>
-              <div>Drop an audio file here</div>
-              <div style={{ fontSize: 12, marginTop: 4 }}>or click to browse (mp3, wav)</div>
+              <div className="upload-plus">＋</div>
+              <div className="upload-title">Drop an audio file here</div>
+              <div className="upload-hint">or click to browse (mp3, wav)</div>
             </div>
           )}
         </label>

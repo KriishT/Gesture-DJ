@@ -285,6 +285,7 @@ export class RemixEngine {
     bed.rampEqLow(-40, spb * 0.5);
 
     const xf = this.eng.crossfader;
+    const target = layerDeck === "A" ? 0 : 1;
     const start = xf.position;
     const startTime = performance.now();
     const dur = spb * 8 * 1000;
@@ -292,7 +293,7 @@ export class RemixEngine {
     const tick = () => {
       const t = Math.min(1, (performance.now() - startTime) / dur);
       const ease = t * t * (3 - 2 * t);
-      xf.setPosition(start + (1 - start) * ease, false);
+      xf.setPosition(start + (target - start) * ease, false);
       if (t < 1) {
         requestAnimationFrame(tick);
         return;
@@ -303,6 +304,7 @@ export class RemixEngine {
       bed.setStemPreset("full");
       bed.setEq({ low: 0, mid: 0, high: 0 });
       bed.setFilter(0);
+      xf.setPosition(target, true);
       this.snapshot = null;
       this.layerPreSync = false;
       this.set({

@@ -19,7 +19,7 @@ export function Knob({
   min,
   max,
   onChange,
-  size = 46,
+  size = 30,
   color = "#00d2ff",
   format,
 }: Props) {

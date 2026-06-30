@@ -6,6 +6,8 @@ import type { RemixDirection, RemixLayerKind } from "../remix/types";
 import type { TrackAnalysis } from "../copilot/recipeTypes";
 import type { DeckId, DeckState } from "../state/types";
 import { formatTime } from "./format";
+import { DemoSetPlaybook } from "./DemoSetPlaybook";
+import { guideForDemoSet } from "../data/demoSetGuide";
 
 function ensureAnalysis(deck: DeckState): TrackAnalysis {
   if (deck.analysis) return deck.analysis;
@@ -23,9 +25,11 @@ function ensureAnalysis(deck: DeckState): TrackAnalysis {
   };
 }
 
-export function RemixPanel() {
+export function RemixPanel({ variant = "card" }: { variant?: "card" | "dock" | "center" }) {
   const deckA = useStore((s) => s.decks.A);
   const deckB = useStore((s) => s.decks.B);
+  const activeDemoSetId = useStore((s) => s.activeDemoSetId);
+  const demoGuide = guideForDemoSet(activeDemoSetId);
   const remix = useRemix();
   const engine = () => session.getRemixEngine();
 
@@ -62,17 +66,29 @@ export function RemixPanel() {
   const layerCue = layerId === "A" ? remix.cueA : remix.cueB;
 
   return (
-    <div className="remix-panel">
-      <div className="remix-header">
-        <h2>Remix Lab</h2>
-        <span className="remix-badge">Isolated from DJ mode</span>
-      </div>
+    <div
+      className={`remix-panel ${variant === "dock" ? "dock-pane" : ""} ${variant === "center" ? "center-panel" : ""}`}
+    >
+      {variant === "card" && (
+        <div className="remix-header">
+          <h2>Remix Lab</h2>
+          <span className="remix-badge">Isolated from DJ mode</span>
+        </div>
+      )}
       <p className="remix-hint">
         Analyze picks direction-aware start points. Balanced mix: bed groove stays present, layer
         vocals sit on top without drowning the beat.
       </p>
 
       {!ready && <div className="hint">Load tracks on both decks to start.</div>}
+
+      <DemoSetPlaybook context="remix" />
+
+      {demoGuide && demoGuide.workspace === "transition" && (
+        <div className="demo-set-warn">
+          This pair is <strong>transition-first</strong> — remix is optional here.
+        </div>
+      )}
 
       {ready && (
         <>

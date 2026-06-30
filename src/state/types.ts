@@ -45,6 +45,7 @@ export interface DeckState {
   stemsStatus: StemStatus;
   stemsProgress: number;
   stemsElapsedSec: number | null;
+  stemsGpu: string | null;
   stemsError: string | null;
   stemPreset: "full" | "acapella" | "instrumental" | "drums" | "bass" | "guitar" | "piano" | "custom";
   stemLevels: StemLevels;

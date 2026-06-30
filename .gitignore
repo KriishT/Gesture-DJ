@@ -28,3 +28,7 @@ Thumbs.db
 
 # Large MediaPipe model binaries (download separately)
 public/models/*.task
+
+# User-provided demo audio (see public/demo/README.md)
+public/demo/**/*
+!public/demo/README.md

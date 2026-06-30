@@ -154,6 +154,23 @@ export class TransitionGuard {
     this.eng.crossfader.setPosition(0, true);
   }
 
+  /** Start deck B at the transition downbeat so crossfades always have audio underneath. */
+  kickoffIncomingDeck(): void {
+    this.ensureDeckBPlaying(true);
+  }
+
+  private ensureDeckBPlaying(alignToMaster = false): void {
+    const b = this.eng.deckB;
+    if (!b.hasTrack) return;
+    if (alignToMaster && (this.usesStems || this.usesSlam)) {
+      this.alignDeckToMaster("B", "A");
+    }
+    if (!b.playing) {
+      b.setVolume(1, false);
+      b.play();
+    }
+  }
+
   execute(action: StepAction, secondsPerBeat: number): void {
     const deck = this.eng.deck(action.deck as DeckRef);
     const isB = action.deck === "B";
@@ -162,16 +179,15 @@ export class TransitionGuard {
 
     switch (action.type) {
       case "play":
-        if (!deck.playing) {
-          if (isB && (this.usesStems || this.usesSlam)) {
-            this.alignDeckToMaster("B", "A");
-          }
+        if (isB) this.ensureDeckBPlaying(this.usesStems || this.usesSlam);
+        else if (!deck.playing) {
           deck.setVolume(1, false);
           deck.play();
         }
         break;
       case "volume": {
         const t = action.target ?? 1;
+        if (isB && t > 0.08) this.ensureDeckBPlaying();
         this.crossfadeTo(isB ? t : 1 - t, Math.max(secondsPerBeat * 2, dur));
         if (isB && t >= 0.55) this.beginTempoRestore(Math.max(dur, secondsPerBeat * 4));
         break;
@@ -186,6 +202,7 @@ export class TransitionGuard {
         deck.rampEqLow(0, Math.max(secondsPerBeat * 2, dur));
         break;
       case "crossfade":
+        if (isB && (action.target ?? 1) > 0.08) this.ensureDeckBPlaying();
         this.crossfadeTo(action.target ?? 1, Math.max(secondsPerBeat * 3, dur));
         if (isB && (action.target ?? 1) >= 0.55) {
           this.beginTempoRestore(Math.max(dur, secondsPerBeat * 4));
@@ -251,6 +268,7 @@ export class TransitionGuard {
         break;
       case "stemPreset": {
         if (!deck.stemsReady) break;
+        if (isB) this.ensureDeckBPlaying(true);
         const preset = (action.preset ?? "full") as StemPresetKind;
         const master = rhythmMasterForStem(action.deck as DeckRef, preset);
         if (master) this.alignDeckToMaster(action.deck as DeckRef, master);
@@ -330,6 +348,7 @@ export class TransitionGuard {
   }
 
   private crossfadeTo(target: number, durationSec: number): void {
+    if (target > 0.08) this.ensureDeckBPlaying();
     this.cancelCrossfadeAnim();
     const xf = this.eng.crossfader;
     const start = xf.position;
@@ -375,7 +394,9 @@ export class TransitionGuard {
 
   finalize(): void {
     this.cancelCrossfadeAnim();
+    this.ensureDeckBPlaying();
     this.eng.crossfader.setPosition(1, true);
+    this.eng.deckB.setVolume(1, false);
     this.eng.deckB.setEq({ low: 0, mid: 0, high: 0 });
     this.eng.deckB.setFilter(0);
     this.clearFx();

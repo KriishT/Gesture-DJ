@@ -5,7 +5,15 @@ import { detectBeat } from "../audio/bpm";
 import { computeTransitionSyncRatio } from "../audio/syncRatio";
 import type { EqValues, DeckId as AudioDeckId } from "../audio/Deck";
 import { analyzeTrack } from "../copilot/trackAnalysis";
-import { separateStems, type StemName, STEM_NAMES } from "../stems/client";
+import type { StemBackendInfo, StemBackendMode } from "../stems/types";
+import {
+  separateStems,
+  loadStemBackendMode,
+  saveStemBackendMode,
+  probeStemsBackend,
+  type StemName,
+  STEM_NAMES,
+} from "../stems/client";
 import type {
   DeckState,
   GestureState,
@@ -65,6 +73,7 @@ const initialDeck = (id: DeckId): DeckState => ({
   stemsStatus: "idle",
   stemsProgress: 0,
   stemsElapsedSec: null,
+  stemsGpu: null,
   stemsError: null,
   stemPreset: "full",
   stemLevels: defaultStemLevels(),
@@ -105,9 +114,15 @@ interface AppState {
   workspace: WorkspaceMode;
   gesture: GestureState;
   showGuide: boolean;
+  /** Active demo folder id (e.g. "set 1") for playbook hints. */
+  activeDemoSetId: string | null;
+  stemBackendMode: StemBackendMode;
+  stemBackendInfo: StemBackendInfo | null;
 
   init: () => Promise<void>;
   loadFile: (id: DeckId, file: File) => Promise<void>;
+  /** Load deck A + B together — parallel decode so one track never blocks the other. */
+  loadPairToDecks: (fileA: File, fileB: File) => Promise<void>;
   togglePlay: (id: DeckId) => void;
   setVolume: (id: DeckId, v: number) => void;
   setFilter: (id: DeckId, v: number) => void;
@@ -138,6 +153,10 @@ interface AppState {
   toggleStem: (id: DeckId, stem: StemName) => void;
   setMode: (m: Mode) => void;
   setShowGuide: (v: boolean) => void;
+  setActiveDemoSetId: (id: string | null) => void;
+  setStemBackendMode: (mode: StemBackendMode) => void;
+  refreshStemBackendInfo: () => Promise<void>;
+  retryStems: (id: DeckId) => void;
 
   setGestureStatus: (s: GestureState["status"], err?: string) => void;
   setGestureEnabled: (v: boolean) => void;
@@ -148,7 +167,129 @@ interface AppState {
   _tick: () => void;
 }
 
-export const useStore = create<AppState>((set, get) => ({
+export const useStore = create<AppState>((set, get) => {
+  let loadGen = 0;
+  const stemSourceFiles: Partial<Record<DeckId, File>> = {};
+
+  const startStemSeparation = (id: DeckId, file: File, gen: number) => {
+    stemSourceFiles[id] = file;
+    const backend = get().stemBackendMode;
+    set((s) => ({
+      decks: {
+        ...s.decks,
+        [id]: { ...s.decks[id], stemsStatus: "processing", stemsProgress: 0, stemsGpu: null, stemsError: null },
+      },
+    }));
+    separateStems(
+      file,
+      backend,
+      (st) => {
+      if (gen !== loadGen) return;
+      set((s) => ({
+        decks: {
+          ...s.decks,
+          [id]: {
+            ...s.decks[id],
+            stemsProgress: st.progress,
+            stemsElapsedSec: st.elapsedSec ?? null,
+            stemsGpu: st.gpu ?? null,
+          },
+        },
+      }));
+    })
+      .then(async (result) => {
+        if (gen !== loadGen) return;
+        const eng = getEngine();
+        const stemBuffers: Partial<Record<StemName, AudioBuffer>> = {};
+        for (const name of STEM_NAMES) {
+          const ab = result.stems[name];
+          if (ab) stemBuffers[name] = await eng.decode(ab.slice(0));
+        }
+        eng.deck(id).loadStems(stemBuffers);
+        set((s) => ({
+          decks: {
+            ...s.decks,
+            [id]: {
+              ...s.decks[id],
+              stemsStatus: "ready",
+              stemsProgress: 1,
+              stemsElapsedSec: result.elapsedSec,
+              stemsGpu: result.gpu ?? null,
+              stemLevels: defaultStemLevels(),
+            },
+          },
+        }));
+      })
+      .catch((err) => {
+        if (gen !== loadGen) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        const unavailable = msg.includes("CUDA") || msg.includes("Python");
+        set((s) => ({
+          decks: {
+            ...s.decks,
+            [id]: {
+              ...s.decks[id],
+              stemsStatus: unavailable ? "unavailable" : "error",
+              stemsError: msg,
+            },
+          },
+        }));
+      });
+  };
+
+  const commitLoadedDeck = (
+    id: DeckId,
+    file: File,
+    audioBuffer: AudioBuffer,
+    beat: { bpm: number; offset: number },
+    gen: number,
+  ) => {
+    const eng = getEngine();
+    beatClocks[id] = new BeatClock(beat, () => eng.deck(id).position);
+    const peaks = computePeaks(audioBuffer);
+    set((s) => ({
+      decks: {
+        ...s.decks,
+        [id]: {
+          ...s.decks[id],
+          hasTrack: true,
+          loading: false,
+          duration: audioBuffer.duration,
+          bpm: beat.bpm,
+          beatOffset: beat.offset,
+          playing: false,
+          position: 0,
+          cuePoint: 0,
+          peaks,
+        },
+      },
+    }));
+    analyzeTrack(audioBuffer, file.name, beat)
+      .then((analysis) => {
+        if (gen !== loadGen) return;
+        set((s) => ({
+          decks: { ...s.decks, [id]: { ...s.decks[id], analysis } },
+        }));
+      })
+      .catch(() => {
+        /* analysis is best-effort */
+      });
+    startStemSeparation(id, file, gen);
+  };
+
+  const ingestOneTrack = async (id: DeckId, file: File, gen: number): Promise<void> => {
+    const eng = getEngine();
+    const arrayBuffer = await file.arrayBuffer();
+    if (gen !== loadGen) return;
+    const audioBuffer = await eng.decode(arrayBuffer.slice(0));
+    if (gen !== loadGen) return;
+    eng.deck(id).loadBuffer(audioBuffer);
+    const beat = await detectBeat(audioBuffer);
+    if (gen !== loadGen) return;
+    commitLoadedDeck(id, file, audioBuffer, beat, gen);
+  };
+
+  return {
   initialized: false,
   decks: { A: initialDeck("A"), B: initialDeck("B") },
   crossfader: 0,
@@ -162,6 +303,9 @@ export const useStore = create<AppState>((set, get) => ({
   mode: "assisted",
   workspace: "dj",
   showGuide: false,
+  activeDemoSetId: null,
+  stemBackendMode: loadStemBackendMode(),
+  stemBackendInfo: null,
   gesture: {
     enabled: true,
     status: "off",
@@ -180,102 +324,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   loadFile: async (id, file) => {
+    const gen = ++loadGen;
     const eng = getEngine();
     await eng.resume();
+    if (!get().initialized) await get().init();
     set((s) => ({
       decks: { ...s.decks, [id]: { ...s.decks[id], loading: true, fileName: file.name } },
     }));
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const audioBuffer = await eng.decode(arrayBuffer.slice(0));
-      eng.deck(id).loadBuffer(audioBuffer);
-
-      const beat = await detectBeat(audioBuffer);
-      beatClocks[id] = new BeatClock(beat, () => eng.deck(id).position);
-      const peaks = computePeaks(audioBuffer);
-
-      set((s) => ({
-        decks: {
-          ...s.decks,
-          [id]: {
-            ...s.decks[id],
-            hasTrack: true,
-            loading: false,
-            duration: audioBuffer.duration,
-            bpm: beat.bpm,
-            beatOffset: beat.offset,
-            playing: false,
-            position: 0,
-            cuePoint: 0,
-            peaks,
-          },
-        },
-      }));
-
-      // Deeper analysis runs after load (best-effort, non-blocking).
-      analyzeTrack(audioBuffer, file.name, beat)
-        .then((analysis) => {
-          set((s) => ({
-            decks: { ...s.decks, [id]: { ...s.decks[id], analysis } },
-          }));
-        })
-        .catch(() => {
-          /* analysis is best-effort */
-        });
-
-      // GPU stem separation (HTDemucs 6-stem, ~5-15s on NVIDIA GPU).
-      set((s) => ({
-        decks: {
-          ...s.decks,
-          [id]: { ...s.decks[id], stemsStatus: "processing", stemsProgress: 0, stemsError: null },
-        },
-      }));
-      separateStems(file, (st) => {
-        set((s) => ({
-          decks: {
-            ...s.decks,
-            [id]: {
-              ...s.decks[id],
-              stemsProgress: st.progress,
-              stemsElapsedSec: st.elapsedSec ?? null,
-            },
-          },
-        }));
-      })
-        .then(async (result) => {
-          const stemBuffers: Partial<Record<StemName, AudioBuffer>> = {};
-          for (const name of STEM_NAMES) {
-            const ab = result.stems[name];
-            if (ab) stemBuffers[name] = await eng.decode(ab.slice(0));
-          }
-          eng.deck(id).loadStems(stemBuffers);
-          set((s) => ({
-            decks: {
-              ...s.decks,
-              [id]: {
-                ...s.decks[id],
-                stemsStatus: "ready",
-                stemsProgress: 1,
-                stemsElapsedSec: result.elapsedSec,
-                stemLevels: defaultStemLevels(),
-              },
-            },
-          }));
-        })
-        .catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          const unavailable = msg.includes("CUDA") || msg.includes("Python");
-          set((s) => ({
-            decks: {
-              ...s.decks,
-              [id]: {
-                ...s.decks[id],
-                stemsStatus: unavailable ? "unavailable" : "error",
-                stemsError: msg,
-              },
-            },
-          }));
-        });
+      await ingestOneTrack(id, file, gen);
     } catch (e) {
       set((s) => ({
         decks: {
@@ -284,6 +341,43 @@ export const useStore = create<AppState>((set, get) => ({
         },
       }));
       console.error("Failed to load track", e);
+      throw e;
+    }
+  },
+
+  loadPairToDecks: async (fileA, fileB) => {
+    const gen = ++loadGen;
+    const eng = getEngine();
+    await eng.resume();
+    if (!get().initialized) await get().init();
+    set((s) => ({
+      decks: {
+        A: { ...s.decks.A, loading: true, fileName: fileA.name },
+        B: { ...s.decks.B, loading: true, fileName: fileB.name },
+      },
+    }));
+    try {
+      const [rawA, rawB] = await Promise.all([fileA.arrayBuffer(), fileB.arrayBuffer()]);
+      if (gen !== loadGen) return;
+      const audioA = await eng.decode(rawA.slice(0));
+      if (gen !== loadGen) return;
+      const audioB = await eng.decode(rawB.slice(0));
+      if (gen !== loadGen) return;
+      eng.deckA.loadBuffer(audioA);
+      eng.deckB.loadBuffer(audioB);
+      const [beatA, beatB] = await Promise.all([detectBeat(audioA), detectBeat(audioB)]);
+      if (gen !== loadGen) return;
+      commitLoadedDeck("A", fileA, audioA, beatA, gen);
+      commitLoadedDeck("B", fileB, audioB, beatB, gen);
+    } catch (e) {
+      set((s) => ({
+        decks: {
+          A: { ...s.decks.A, loading: false, hasTrack: false, fileName: null },
+          B: { ...s.decks.B, loading: false, hasTrack: false, fileName: null },
+        },
+      }));
+      console.error("Failed to load pair", e);
+      throw e;
     }
   },
 
@@ -537,12 +631,15 @@ export const useStore = create<AppState>((set, get) => ({
 
   commitRemixMorph: () => {
     const eng = getEngine();
-    const layerIsB = eng.crossfader.position >= 0.5;
+    const layerDeck = session.getRemixEngine().getSnapshot().layerDeck;
+    const layerIsA = layerDeck === "A";
+    const xf = layerIsA ? 0 : 1;
+    eng.crossfader.setPosition(xf, true);
     const a = eng.deckA;
     const b = eng.deckB;
     const cleanEq = { low: 0, mid: 0, high: 0 };
     set((s) => ({
-      crossfader: eng.crossfader.position,
+      crossfader: xf,
       decks: {
         A: {
           ...s.decks.A,
@@ -550,8 +647,8 @@ export const useStore = create<AppState>((set, get) => ({
           position: a.position,
           rate: a.rate,
           keyLock: a.keyLockEnabled,
-          eq: layerIsB ? cleanEq : a.getEq(),
-          filter: layerIsB ? 0 : s.decks.A.filter,
+          eq: layerIsA ? a.getEq() : cleanEq,
+          filter: layerIsA ? s.decks.A.filter : 0,
           bassKill: false,
           stemPreset: "full",
           stemLevels: defaultStemLevels(),
@@ -562,8 +659,8 @@ export const useStore = create<AppState>((set, get) => ({
           position: b.position,
           rate: b.rate,
           keyLock: b.keyLockEnabled,
-          eq: layerIsB ? b.getEq() : cleanEq,
-          filter: layerIsB ? s.decks.B.filter : 0,
+          eq: layerIsA ? cleanEq : b.getEq(),
+          filter: layerIsA ? 0 : s.decks.B.filter,
           bassKill: false,
           stemPreset: "full",
           stemLevels: defaultStemLevels(),
@@ -616,6 +713,26 @@ export const useStore = create<AppState>((set, get) => ({
 
   setMode: (m) => set({ mode: m }),
   setShowGuide: (v) => set({ showGuide: v }),
+  setActiveDemoSetId: (id) => set({ activeDemoSetId: id }),
+
+  setStemBackendMode: (mode) => {
+    saveStemBackendMode(mode);
+    set({ stemBackendMode: mode });
+  },
+
+  refreshStemBackendInfo: async () => {
+    const info = await probeStemsBackend();
+    set({ stemBackendInfo: info });
+    if (info.serverCloudOnly) {
+      set({ stemBackendMode: "cloud" });
+    }
+  },
+
+  retryStems: (id) => {
+    const file = stemSourceFiles[id];
+    if (!file) return;
+    startStemSeparation(id, file, loadGen);
+  },
 
   setGestureStatus: (status, err) =>
     set((s) => ({ gesture: { ...s.gesture, status, errorMessage: err } })),
@@ -657,7 +774,8 @@ export const useStore = create<AppState>((set, get) => ({
       },
     }));
   },
-}));
+};
+});
 
 let rafId: number | null = null;
 let lastTick = 0;

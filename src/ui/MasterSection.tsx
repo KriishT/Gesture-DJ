@@ -46,7 +46,7 @@ export function MasterSection() {
 
       <div className="master-controls">
         <div className="master-fader-wrap">
-          <Fader value={masterVolume} color="#ff8a1e" onChange={setMasterVolume} height={88} />
+          <Fader value={masterVolume} color="#ff8a1e" onChange={setMasterVolume} height={42} />
           <span className="fader-label">MST</span>
         </div>
 

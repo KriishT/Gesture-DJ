@@ -16,6 +16,8 @@ export interface CopilotRuntime {
   countdownBeats: number;
   armedAtSec: number;
   live: boolean;
+  /** True when camera is off — mix is automatic, no gesture scoring. */
+  passive: boolean;
 }
 
 interface DeckTiming {
@@ -55,6 +57,10 @@ export class CoPilotEngine {
   private gestureHoldMs = new Map<number, number>();
   private lastSampleMs = 0;
   private completed = false;
+  /** When false (camera off), mix runs without gesture scoring — steps auto-complete on the beat. */
+  private gesturesEnabled = true;
+  /** Wall-clock anchor for passive mode — keeps the mix moving if Song A ends or pauses. */
+  private passiveWallStartMs = 0;
 
   constructor(
     eng: AudioEngine,
@@ -74,6 +80,14 @@ export class CoPilotEngine {
 
   getSnapshot = (): CopilotRuntime => this.runtime;
 
+  /** Camera on = score gestures. Camera off = passive auto-mix on the musical grid. */
+  setGesturesEnabled(enabled: boolean): void {
+    this.gesturesEnabled = enabled;
+    if (this.runtime.phase !== "idle") {
+      this.set({ passive: !enabled });
+    }
+  }
+
   private emit(): void {
     this.listeners.forEach((l) => l());
   }
@@ -89,6 +103,7 @@ export class CoPilotEngine {
     this.gestureHoldMs.clear();
     this.lastSampleMs = 0;
     this.completed = false;
+    this.passiveWallStartMs = 0;
     this.runtime = {
       phase: "armed",
       recipe,
@@ -98,6 +113,7 @@ export class CoPilotEngine {
       countdownBeats: 0,
       armedAtSec: recipe.cueOutA,
       live: false,
+      passive: !this.gesturesEnabled,
     };
     this.emit();
   }
@@ -109,6 +125,7 @@ export class CoPilotEngine {
     this.audioFired.clear();
     this.gestureHoldMs.clear();
     this.completed = false;
+    this.passiveWallStartMs = 0;
     this.emit();
   }
 
@@ -132,7 +149,9 @@ export class CoPilotEngine {
     this.audioFired.clear();
     this.gestureHoldMs.clear();
     this.lastSampleMs = performance.now();
+    this.passiveWallStartMs = performance.now();
     this.set({ phase: "running" });
+    this.guard.kickoffIncomingDeck();
     this.runAudio(timing);
   }
 
@@ -140,7 +159,12 @@ export class CoPilotEngine {
   private elapsedBars(timing: DeckTiming): number {
     const r = this.runtime.recipe!;
     if (this.barSec <= 0) return 0;
-    return (timing.positionA - r.cueOutA) / this.barSec;
+    const fromPlayhead = (timing.positionA - r.cueOutA) / this.barSec;
+    if (!this.gesturesEnabled && this.runtime.phase === "running" && this.passiveWallStartMs > 0) {
+      const wallBars = (performance.now() - this.passiveWallStartMs) / 1000 / this.barSec;
+      return Math.max(fromPlayhead, wallBars);
+    }
+    return fromPlayhead;
   }
 
   /** Seconds relative to when a step's mix move should land musically. */
@@ -172,13 +196,20 @@ export class CoPilotEngine {
     // --- 1) Mix: always tied to Song A playhead ---
     this.runAudio(timing);
 
-    // --- 2) Score gestures in parallel (never blocks audio) ---
+    // --- 2) Score gestures in parallel (skipped when camera is off) ---
     const results = [...this.runtime.results];
+    const elapsed = this.elapsedBars(timing);
     for (let si = 0; si < r.steps.length; si++) {
       if (results[si] === "green" || results[si] === "red") continue;
 
       const step = r.steps[si];
       const delta = this.deltaSecFromStep(step, timing);
+
+      if (!this.gesturesEnabled) {
+        if (elapsed + 0.04 >= step.atBar) results[si] = "green";
+        continue;
+      }
+
       const { hitBeforeSec, hitAfterSec } = this.hitWindowFor(step);
       const hitEndSec = Math.max(hitAfterSec, MIN_HIT_WINDOW_SEC - hitBeforeSec);
 
@@ -204,7 +235,8 @@ export class CoPilotEngine {
     const { previewSec, hitBeforeSec, hitAfterSec } = this.hitWindowFor(step);
     const hitEndSec = Math.max(hitAfterSec, MIN_HIT_WINDOW_SEC - hitBeforeSec);
     const countdownBeats = (-delta) / this.secPerBeat;
-    const live = delta >= -hitBeforeSec && delta <= hitEndSec;
+    const live =
+      this.gesturesEnabled && delta >= -hitBeforeSec && delta <= hitEndSec;
 
     const displayResults = [...results];
     if (displayResults[focus] === "pending" && delta >= -previewSec) {
@@ -214,13 +246,15 @@ export class CoPilotEngine {
     this.set({
       results: displayResults,
       stepIndex: focus,
-      instruction: step.instruction,
+      instruction: this.gesturesEnabled
+        ? step.instruction
+        : `${step.verb ?? step.instruction} (auto)`,
       countdownBeats: Math.max(0, countdownBeats),
       live,
+      passive: !this.gesturesEnabled,
     });
 
-    // --- 3) End on musical length, not gesture completion ---
-    const elapsed = this.elapsedBars(timing);
+    // --- 3) End on musical length ---
     if (elapsed >= r.bars + 1) {
       this.complete();
     }
@@ -272,9 +306,10 @@ export class CoPilotEngine {
     if (this.completed) return;
     this.completed = true;
 
-    const results = this.runtime.results.map((r) =>
-      r === "green" || r === "red" ? r : "red",
-    );
+    const results = this.runtime.results.map((r) => {
+      if (r === "green" || r === "red") return r;
+      return this.gesturesEnabled ? "red" : "green";
+    });
 
     this.guard.finalize();
     this.onComplete?.();
@@ -282,10 +317,11 @@ export class CoPilotEngine {
     const greens = results.filter((r) => r === "green").length;
     const total = results.length;
     const pct = total ? Math.round((greens / total) * 100) : 0;
-    const scoreLine =
-      total > 0
+    const scoreLine = this.gesturesEnabled
+      ? total > 0
         ? `${greens}/${total} on time (${pct}%) — ${pct >= 80 ? "crushed it!" : pct >= 50 ? "solid mix." : "keep practicing!"}`
-        : "nicely done!";
+        : "nicely done!"
+      : "Auto mix complete — turn the camera on to score your moves.";
 
     this.set({
       phase: "complete",
@@ -306,5 +342,6 @@ function blank(): CopilotRuntime {
     countdownBeats: 0,
     armedAtSec: 0,
     live: false,
+    passive: false,
   };
 }

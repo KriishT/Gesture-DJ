@@ -761,7 +761,7 @@ function scoreTechnique(
 
   if (isStem) {
     if (!ctx.stemsReady) return 0.12;
-    impact += 0.06;
+    impact -= 0.22;
     if (ctx.bpmGap > 6) impact -= 0.2;
     if (ctx.bpmGap > 10) impact -= 0.22;
     if (spec.key.includes("acapella") && ctx.vocalHeavy && ctx.bpmGap <= 5) impact += 0.14;
@@ -783,6 +783,17 @@ function scoreTechnique(
 
   impact += (Math.random() - 0.5) * 0.06;
   return Math.max(0.12, Math.min(0.96, impact));
+}
+
+/** Non-stem blends always sort above stem moves in the suggestion list. */
+export function compareSuggestionRank(
+  a: { impact: number; recipe: TransitionRecipe },
+  b: { impact: number; recipe: TransitionRecipe },
+): number {
+  const aStem = recipeUsesStems(a.recipe);
+  const bStem = recipeUsesStems(b.recipe);
+  if (aStem !== bStem) return aStem ? 1 : -1;
+  return b.impact - a.impact;
 }
 
 /**
@@ -830,11 +841,11 @@ export function buildLibrarySuggestions(
       const impact = scoreTechnique(spec, len, { harmonic, bpmGap, vocalHeavy, stemsReady, blend });
       return { impact, recipe };
     }),
-  ).sort((x, y) => y.impact - x.impact);
+  ).sort(compareSuggestionRank);
 
   const stemNote = stemsReady
-    ? "Stems ready — vocal & rhythm stems auto-sync to the other deck's beat (pitch-locked)."
-    : "Separate stems on both decks to unlock beat-synced acapella overlays and stem swaps.";
+    ? "Standard blends are recommended — stem transitions are experimental and listed below."
+    : "Separate stems on both decks to unlock stem moves (experimental, listed below standard blends).";
 
   return {
     suggestions,

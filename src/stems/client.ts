@@ -1,3 +1,8 @@
+import { apiUrl } from "../config/apiBase";
+import type { StemBackendInfo, StemBackendMode } from "./types";
+
+export type { StemBackendInfo, StemBackendMode } from "./types";
+
 export const STEM_NAMES = ["drums", "bass", "other", "vocals", "guitar", "piano"] as const;
 export type StemName = (typeof STEM_NAMES)[number];
 
@@ -8,6 +13,7 @@ export interface StemJobStatus {
   progress: number;
   elapsedSec?: number;
   gpu?: string;
+  engine?: "local" | "cloud";
   error?: string;
 }
 
@@ -17,14 +23,39 @@ export interface StemSeparateResult {
   gpu?: string;
 }
 
-/** Poll until the stem job finishes or times out. */
-async function waitForJob(jobId: string, timeoutMs = 120_000): Promise<StemJobStatus> {
+const STEM_MODE_KEY = "gesture-dj-stem-backend";
+
+export function loadStemBackendMode(): StemBackendMode {
+  try {
+    const v = localStorage.getItem(STEM_MODE_KEY);
+    if (v === "local" || v === "cloud" || v === "auto") return v;
+  } catch {
+    /* private mode */
+  }
+  return "auto";
+}
+
+export function saveStemBackendMode(mode: StemBackendMode): void {
+  try {
+    localStorage.setItem(STEM_MODE_KEY, mode);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Poll until the stem job finishes or times out (cloud jobs can take several minutes). */
+async function waitForJob(
+  jobId: string,
+  onProgress?: (status: StemJobStatus) => void,
+  timeoutMs = 240_000,
+): Promise<StemJobStatus> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const res = await fetch(`/api/stems/${jobId}`);
+    const res = await fetch(apiUrl(`/api/stems/${jobId}`));
     if (!res.ok) throw new Error(`stem status ${res.status}`);
     const data = (await res.json()) as { status: StemJobStatus };
     const st = data.status;
+    onProgress?.(st);
     if (st.phase === "done") return st;
     if (st.phase === "error") throw new Error(st.error ?? "Stem separation failed");
     await new Promise((r) => setTimeout(r, 500));
@@ -33,30 +64,31 @@ async function waitForJob(jobId: string, timeoutMs = 120_000): Promise<StemJobSt
 }
 
 /**
- * Upload a track for GPU stem separation (HTDemucs 6-stem).
- * Target ~5-15s on an NVIDIA GPU via the local Python backend.
+ * Upload a track for 6-stem separation.
+ * Backend: auto (GPU first, Replicate fallback), local, or cloud.
  */
 export async function separateStems(
   file: File,
+  backend: StemBackendMode,
   onProgress?: (status: StemJobStatus) => void,
 ): Promise<StemSeparateResult> {
   const form = new FormData();
   form.append("audio", file);
+  form.append("backend", backend);
 
-  const res = await fetch("/api/stems", { method: "POST", body: form });
+  const res = await fetch(apiUrl("/api/stems"), { method: "POST", body: form });
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(err.error ?? `stem upload ${res.status}`);
   }
 
   const { jobId } = (await res.json()) as { jobId: string };
-  const final = await waitForJob(jobId, 120_000);
-  onProgress?.(final);
+  const final = await waitForJob(jobId, onProgress, 240_000);
 
   const stems: Partial<Record<StemName, ArrayBuffer>> = {};
   await Promise.all(
     STEM_NAMES.map(async (name) => {
-      const r = await fetch(`/api/stems/${jobId}/${name}`);
+      const r = await fetch(apiUrl(`/api/stems/${jobId}/${name}`));
       if (r.ok) stems[name] = await r.arrayBuffer();
     }),
   );
@@ -72,17 +104,30 @@ export async function separateStems(
   };
 }
 
-/** Check whether the GPU stem backend is available. */
-export async function probeStemsBackend(): Promise<{
-  ok: boolean;
-  message: string;
-}> {
+/** Probe stem backends available on the API host. */
+export async function probeStemsBackend(): Promise<StemBackendInfo> {
   try {
-    const res = await fetch("/health");
-    if (!res.ok) return { ok: false, message: "API offline" };
-    const data = (await res.json()) as { stems?: { ok: boolean; message: string } };
-    return data.stems ?? { ok: false, message: "Stem backend unknown" };
+    const res = await fetch(apiUrl("/health"));
+    if (!res.ok) return { ok: false, message: "API offline", localGpu: false, cloud: false, serverCloudOnly: false };
+    const data = (await res.json()) as {
+      stems?: {
+        ok: boolean;
+        message: string;
+        localGpu?: boolean;
+        cloud?: boolean;
+        serverCloudOnly?: boolean;
+      };
+    };
+    const s = data.stems;
+    if (!s) return { ok: false, message: "Stem backend unknown", localGpu: false, cloud: false, serverCloudOnly: false };
+    return {
+      ok: s.ok,
+      message: s.message,
+      localGpu: Boolean(s.localGpu),
+      cloud: Boolean(s.cloud),
+      serverCloudOnly: Boolean(s.serverCloudOnly),
+    };
   } catch {
-    return { ok: false, message: "Cannot reach API" };
+    return { ok: false, message: "Cannot reach API", localGpu: false, cloud: false, serverCloudOnly: false };
   }
 }

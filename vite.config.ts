@@ -12,6 +12,15 @@ export default defineConfig({
         target: `http://localhost:${API_PORT}`,
         changeOrigin: true,
       },
+      "/health": {
+        target: `http://localhost:${API_PORT}`,
+        changeOrigin: true,
+      },
+      // Express serves public/demo reliably (Vite mishandles commas in encoded paths on Windows).
+      "/demo": {
+        target: `http://localhost:${API_PORT}`,
+        changeOrigin: true,
+      },
     },
   },
 });

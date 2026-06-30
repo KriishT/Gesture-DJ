@@ -1,6 +1,7 @@
+import "./loadEnv.js";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -12,16 +13,15 @@ import {
   probeStemBackend,
   readStemFile,
   STEM_NAMES,
+  type StemBackendMode,
   type StemName,
 } from "./stems/stemJobs";
+import { demoRootDir, listDemoPairs } from "./demoPairs";
 
 // Load server/.env regardless of the process working directory.
 const serverDir = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.join(serverDir, ".env") });
-// Also fall back to a root .env if present.
-dotenv.config();
 
-const PORT = Number(process.env.API_PORT ?? 8787);
+const PORT = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);
 const MODEL = process.env.COPILOT_MODEL ?? "claude-haiku-4-5";
 const MAX_TOKENS = Number(process.env.COPILOT_MAX_TOKENS ?? 3000);
 
@@ -34,9 +34,13 @@ if (!apiKey) {
 
 const client = apiKey ? new Anthropic({ apiKey }) : null;
 
+const corsOrigin = process.env.CORS_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean);
 const app = express();
-app.use(cors());
+app.use(cors(corsOrigin?.length ? { origin: corsOrigin } : undefined));
 app.use(express.json({ limit: "1mb" }));
+
+// Demo audio folders — served from public/demo (add files without rebuilding dist).
+app.use("/demo", express.static(demoRootDir()));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -46,6 +50,16 @@ const upload = multer({
 app.get("/health", async (_req, res) => {
   const stems = await probeStemBackend();
   res.json({ ok: true, model: MODEL, aiEnabled: Boolean(client), stems });
+});
+
+app.get("/api/demo/pairs", async (_req, res) => {
+  try {
+    const pairs = await listDemoPairs();
+    res.json({ pairs });
+  } catch (err) {
+    console.error("[gesture-dj] demo pairs error:", err);
+    res.status(500).json({ error: "Could not scan demo folders" });
+  }
 });
 
 interface CopilotBody {
@@ -129,16 +143,19 @@ app.post("/api/copilot", async (req, res) => {
   }
 });
 
-/** Start GPU stem separation (HTDemucs 6-stem, ~5-15s on NVIDIA GPU). */
+/** Start stem separation (local GPU, Replicate cloud, or auto). */
 app.post("/api/stems", upload.single("audio"), async (req, res) => {
   const file = req.file;
   if (!file) {
     res.status(400).json({ error: "audio file required (multipart field: audio)" });
     return;
   }
+  const raw = (req.query.backend as string) ?? (req.body as { backend?: string })?.backend ?? "auto";
+  const backend: StemBackendMode =
+    raw === "local" || raw === "cloud" ? raw : "auto";
   try {
-    const job = await createStemJob(file.originalname || "track.wav", file.buffer);
-    res.json({ jobId: job.id, status: job.status });
+    const job = await createStemJob(file.originalname || "track.wav", file.buffer, backend);
+    res.json({ jobId: job.id, status: job.status, backend: job.backend });
   } catch (err) {
     console.error("[gesture-dj] stem job error:", err);
     res.status(500).json({ error: "Failed to start stem separation" });
@@ -194,8 +211,37 @@ function extractJson(text: string): unknown | null {
   return null;
 }
 
-const server = app.listen(PORT, () => {
+const distDir = path.join(serverDir, "..", "dist");
+const serveStatic =
+  process.env.SERVE_STATIC === "1" ||
+  (process.env.NODE_ENV === "production" && fs.existsSync(distDir));
+
+if (serveStatic) {
+  app.use(express.static(distDir));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api") || req.path === "/health") {
+      next();
+      return;
+    }
+    res.sendFile(path.join(distDir, "index.html"), (err) => {
+      if (err) next(err);
+    });
+  });
+  console.log(`[gesture-dj] Serving static UI from ${distDir}`);
+}
+
+const server = app.listen(PORT, async () => {
   console.log(`[gesture-dj] API on http://localhost:${PORT} (model: ${MODEL})`);
+  const stems = await probeStemBackend();
+  if (stems.serverCloudOnly) {
+    console.warn(
+      "[gesture-dj] STEMS_CLOUD_ONLY is set — local GPU is disabled; all stem jobs use Replicate.",
+    );
+  } else if (stems.localGpu) {
+    console.log(`[gesture-dj] Stem separation: ${stems.message}`);
+  } else if (stems.cloud) {
+    console.log(`[gesture-dj] Stem separation: no local GPU — Replicate fallback available`);
+  }
 });
 
 function gracefulShutdown(signal: string): void {

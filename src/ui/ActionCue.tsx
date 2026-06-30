@@ -1,4 +1,5 @@
 import { useCopilot } from "./useCopilot";
+import { useStore } from "../state/store";
 import type { MacroGesture } from "../copilot/recipeTypes";
 import { isDualGesture } from "../copilot/choreography";
 
@@ -59,6 +60,8 @@ function SideCue({ side, motion, accent }: { side: "left" | "right"; motion: Mot
 /** Animated motion cues with swipe trails for dual/single gestures. */
 export function ActionCue() {
   const rt = useCopilot();
+  const cameraOn = useStore((s) => s.gesture.enabled && s.gesture.status === "ready");
+  if (!cameraOn || rt.passive) return null;
   if (rt.phase !== "running" || !rt.recipe) return null;
   const step = rt.recipe.steps[rt.stepIndex];
   if (!step) return null;

@@ -142,6 +142,9 @@ class Session {
     }
 
     const copilot = this.getCopilot();
+    const gesturesOn =
+      store.gesture.enabled && store.gesture.status === "ready";
+    copilot.setGesturesEnabled(gesturesOn);
     copilot.update(timing);
     const phase = copilot.getSnapshot().phase;
     if (phase !== "running") {

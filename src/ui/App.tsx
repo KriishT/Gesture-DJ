@@ -6,11 +6,13 @@ import { DeckView } from "./DeckView";
 import { MasterSection } from "./MasterSection";
 import { TransitionBuilder } from "./TransitionBuilder";
 import { CameraOverlay } from "./CameraOverlay";
-import { SuggestionPanel } from "./SuggestionPanel";
+import { LibraryDock } from "./LibraryDock";
 import { GestureGuide } from "./GestureGuide";
 import { RecordButton } from "./RecordButton";
 import { WaveformRig } from "./WaveformRig";
 import { RemixPanel } from "./RemixPanel";
+import { SuggestionPanel } from "./SuggestionPanel";
+import { StemBackendControl } from "./StemBackendControl";
 import type { WorkspaceMode } from "../state/types";
 
 export function App() {
@@ -23,6 +25,8 @@ export function App() {
   const setGestureEnabled = useStore((s) => s.setGestureEnabled);
   const [showGuide, setShowGuide] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [autoSuggest, setAutoSuggest] = useState(0);
   const captureRootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -89,6 +93,16 @@ export function App() {
         )}
 
         <div className="topbar-actions">
+          <StemBackendControl />
+          {((workspace === "dj" && mode === "assisted") || workspace === "remix") && (
+            <button
+              type="button"
+              className={`btn ${libraryOpen ? "primary" : "ghost"}`}
+              onClick={() => setLibraryOpen((o) => !o)}
+            >
+              Library
+            </button>
+          )}
           <span className={`status-pill ${gesture.status}`}>
             {gesture.status === "ready"
               ? "Hands ready"
@@ -98,7 +112,11 @@ export function App() {
                   ? "Camera error"
                   : "Camera off"}
           </span>
-          <button className="btn" onClick={toggleCamera}>
+          <button
+            type="button"
+            className={`btn ${gesture.enabled ? "ghost" : "primary"}`}
+            onClick={toggleCamera}
+          >
             {gesture.enabled ? "Stop camera" : "Start camera"}
           </button>
           <RecordButton />
@@ -118,14 +136,26 @@ export function App() {
             <CameraOverlay />
             <MasterSection />
             {workspace === "dj" && mode === "assisted" && (
-              <SuggestionPanel onBuild={() => setShowBuilder(true)} />
+              <SuggestionPanel
+                variant="center"
+                onBuild={() => setShowBuilder(true)}
+                autoSuggestToken={autoSuggest}
+              />
             )}
-            {workspace === "remix" && <RemixPanel />}
+            {workspace === "remix" && <RemixPanel variant="center" />}
           </div>
 
           <DeckView id="B" />
         </main>
       </div>
+
+      <LibraryDock
+        workspace={workspace}
+        mode={mode}
+        open={libraryOpen}
+        onOpenChange={setLibraryOpen}
+        onPairLoaded={() => setAutoSuggest((n) => n + 1)}
+      />
 
       {showGuide && <GestureGuide onClose={() => setShowGuide(false)} />}
       {showBuilder && <TransitionBuilder onClose={() => setShowBuilder(false)} />}

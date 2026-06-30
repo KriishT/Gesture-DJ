@@ -388,7 +388,8 @@ export class Deck {
 
   /** Start (or resume) playback, optionally from a specific offset (cue point). */
   play(offset?: number): void {
-    if (!this.buffer || this._playing) return;
+    if (!this.buffer) return;
+    if (this._playing && this.activeSources().length > 0) return;
     if (offset !== undefined) {
       this.startOffset = clamp(offset, 0, this.buffer.duration);
     }
