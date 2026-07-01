@@ -224,6 +224,17 @@ function startLocalJob(
     }
   });
 
+  child.on("error", async (e: NodeJS.ErrnoException) => {
+    clearInterval(poll);
+    const msg =
+      e.code === "ENOENT"
+        ? "Python not installed on this server"
+        : `Failed to start stem process: ${e.message}`;
+    console.error(`[stems:${job.id}]`, msg);
+    job.status = { phase: "error", progress: 0, engine: "local", error: msg };
+    await fs.writeFile(statusPath, JSON.stringify(job.status)).catch(() => {});
+  });
+
   child.stderr?.on("data", (d) => {
     console.error(`[stems:${job.id}]`, d.toString().trim());
   });
@@ -262,6 +273,18 @@ async function probeLocalCuda(): Promise<{
   gpuName?: string;
 }> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: {
+      ok: boolean;
+      python: string;
+      message: string;
+      gpuName?: string;
+    }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
     const child = spawn(PYTHON, ["-c", PROBE_SCRIPT], {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -269,10 +292,20 @@ async function probeLocalCuda(): Promise<{
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
+    child.on("error", (e: NodeJS.ErrnoException) => {
+      const noPython = e.code === "ENOENT";
+      finish({
+        ok: false,
+        python: PYTHON,
+        message: noPython
+          ? "Python not installed on this server — use Replicate cloud stems"
+          : `Python probe failed: ${e.message}`,
+      });
+    });
     child.on("close", (code) => {
       if (code !== 0) {
         const detail = err.trim().split("\n").pop() ?? "import failed";
-        resolve({
+        finish({
           ok: false,
           python: PYTHON,
           message: `Python GPU stack not ready (${detail}). Run: pip install -r server/stems/requirements.txt`,
@@ -287,7 +320,7 @@ async function probeLocalCuda(): Promise<{
       const hasCuda = lines[0] === "cuda";
       if (hasCuda) {
         const gpuName = lines[1]?.trim() || "NVIDIA GPU";
-        resolve({
+        finish({
           ok: true,
           python: PYTHON,
           gpuName,
@@ -295,7 +328,7 @@ async function probeLocalCuda(): Promise<{
         });
         return;
       }
-      resolve({
+      finish({
         ok: false,
         python: PYTHON,
         message: "CUDA GPU not found on this machine",
