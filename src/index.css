@@ -1796,6 +1796,25 @@ body {
   border-top: 1px solid var(--line);
 }
 
+.howto-steps,
+.howto-list {
+  margin: 0 0 8px;
+  padding-left: 1.25rem;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.howto-steps li,
+.howto-list li {
+  margin-bottom: 6px;
+}
+
+.howto-steps b,
+.howto-list b {
+  color: #e8eaef;
+}
+
 .hand-tag {
   font-size: 9px;
   font-weight: 900;

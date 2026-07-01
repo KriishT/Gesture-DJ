@@ -26,6 +26,7 @@ cp server/.env.example server/.env
 
 Optional in `server/.env`: `ANTHROPIC_API_KEY`, `REPLICATE_API_TOKEN`, `REPLICATE_DEMUX_VERSION`
 
+- **How to use (new users):** [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 - Stems (local GPU): [docs/STEMS_SETUP.md](docs/STEMS_SETUP.md)
 - **Deploy:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 

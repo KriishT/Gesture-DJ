@@ -8,6 +8,7 @@ import { TransitionBuilder } from "./TransitionBuilder";
 import { CameraOverlay } from "./CameraOverlay";
 import { LibraryDock } from "./LibraryDock";
 import { GestureGuide } from "./GestureGuide";
+import { HowToUseGuide } from "./HowToUseGuide";
 import { RecordButton } from "./RecordButton";
 import { WaveformRig } from "./WaveformRig";
 import { RemixPanel } from "./RemixPanel";
@@ -24,6 +25,7 @@ export function App() {
   const gesture = useStore((s) => s.gesture);
   const setGestureEnabled = useStore((s) => s.setGestureEnabled);
   const [showGuide, setShowGuide] = useState(false);
+  const [showHowTo, setShowHowTo] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [autoSuggest, setAutoSuggest] = useState(0);
@@ -120,6 +122,9 @@ export function App() {
             {gesture.enabled ? "Stop camera" : "Start camera"}
           </button>
           <RecordButton />
+          <button type="button" className="btn ghost" onClick={() => setShowHowTo(true)}>
+            How to use
+          </button>
           <button className="btn ghost" onClick={() => setShowGuide(true)}>
             Gesture guide
           </button>
@@ -157,6 +162,7 @@ export function App() {
         onPairLoaded={() => setAutoSuggest((n) => n + 1)}
       />
 
+      {showHowTo && <HowToUseGuide onClose={() => setShowHowTo(false)} />}
       {showGuide && <GestureGuide onClose={() => setShowGuide(false)} />}
       {showBuilder && <TransitionBuilder onClose={() => setShowBuilder(false)} />}
     </div>
